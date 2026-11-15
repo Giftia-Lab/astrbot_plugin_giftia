@@ -813,15 +813,14 @@ async def test_each_new_batch_has_an_independent_review_opportunity(runtime):
 
 
 @pytest.mark.asyncio
-async def test_review_tokens_are_separate_from_decision_and_reply(runtime):
+@pytest.mark.parametrize("usage_type", ["reply_review", "session_completion"])
+async def test_review_tokens_are_separate_from_decision_and_reply(runtime, usage_type):
     db = runtime.plugin.db
-    await db.log_token_usage(
-        "bot", "group", "reply_review", "review", "model", 10, 2, 12
-    )
+    await db.log_token_usage("bot", "group", usage_type, "review", "model", 10, 2, 12)
     stats = await db.get_token_stats(bot_name="bot")
     assert stats["summary"]["total_tokens"] == 12
-    assert stats["summary"]["reply_review_tokens"] == 12
-    assert stats["summary"]["reply_review_prompt_tokens"] == 10
+    assert stats["summary"][f"{usage_type}_tokens"] == 12
+    assert stats["summary"][f"{usage_type}_prompt_tokens"] == 10
     assert stats["summary"]["decision_tokens"] == 0
     assert stats["summary"]["reply_tokens"] == 0
 

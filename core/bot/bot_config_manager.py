@@ -61,6 +61,7 @@ DEFAULT_BOT_CONFIG = {
     "blocked_users": {},
     "decision_conf": {
         "provider_ids": [],
+        "session_completion_provider_id": "",
         "group_whitelist_mode": "blacklist",
         "group_whitelist": [],
         "private_whitelist_mode": "whitelist",
@@ -321,6 +322,9 @@ class BotConfigManager:
             "provider_ids": [
                 str(p).strip() for p in raw_dec.get("provider_ids") or [] if p
             ],
+            "session_completion_provider_id": str(
+                raw_dec.get("session_completion_provider_id") or ""
+            ).strip(),
             **access_conf,
             "decision_prompt": str(raw_dec.get("decision_prompt") or ""),
             "reply_active_window": int(raw_dec.get("reply_active_window", 10)),

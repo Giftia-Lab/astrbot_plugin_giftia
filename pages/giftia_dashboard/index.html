@@ -1744,6 +1744,10 @@
                 <!-- Sub-tab 3: Decision Conf -->
                 <div id="subtab-decision" class="bot-subtab-content" style="display: none;">
                     <div class="form-group">
+                        <label for="bot-form-session-completion-provider">会话防抖决策模型（可选） <span class="info-tooltip" data-tooltip="选择决策模型后，在短暂静默时判断用户是否已表达完整，完成则提前结束合并等待。留空关闭；判断失败或未完成时沿用原等待时间。"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
+                        <select id="bot-form-session-completion-provider"></select>
+                    </div>
+                    <div class="form-group">
                         <label>小模型提供商优先级 <span class="info-tooltip" data-tooltip="按标签顺序依次尝试；当前提供商失败则自动降级"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
                         <div id="bot-form-dec-providers" class="tag-select-container"></div>
                     </div>

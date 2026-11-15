@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from core.llm.provider_health import ProviderHealth, ProviderUnavailableError, get_provider_health
+from core.llm.provider_health import (
+    ProviderHealth,
+    ProviderUnavailableError,
+    get_provider_health,
+)
 from core.web.model_health_api import ModelHealthApi
 from fastapi import FastAPI, Request
 
@@ -25,6 +29,7 @@ def runtime():
         "reply",
         "backup",
         "review",
+        "completion",
         "media",
         "inspect",
         "summary",
@@ -53,7 +58,10 @@ def runtime():
         context=context,
         bot_map={
             "bot": {
-                "decision_conf": {"provider_ids": ["shared"]},
+                "decision_conf": {
+                    "provider_ids": ["shared"],
+                    "session_completion_provider_id": "completion",
+                },
                 "llm_reply_conf": {
                     "provider_ids": ["reply", "shared", "missing"],
                     "invalid_reply_fallback_provider_ids": ["backup"],
@@ -103,6 +111,7 @@ async def test_inventory_deduplicates_ids_covers_all_roles_and_omits_credentials
         "reply",
         "backup",
         "review",
+        "completion",
         "media",
         "inspect",
         "summary",
@@ -116,6 +125,7 @@ async def test_inventory_deduplicates_ids_covers_all_roles_and_omits_credentials
     }
     assert rows["missing"]["registered"] is False
     assert rows["reply"]["model"] == "model-reply"
+    assert rows["completion"]["uses"] == ["bot · 会话防抖判断"]
     assert "sk-secret" not in response.text
     runtime.plugin.context.llm_generate.assert_not_awaited()
 
@@ -283,7 +293,9 @@ async def test_background_probe_and_manual_test_share_one_request_slot(runtime):
 
 
 @pytest.mark.asyncio
-async def test_controls_persist_across_database_reopen_and_block_all_tests(runtime, tmp_path):
+async def test_controls_persist_across_database_reopen_and_block_all_tests(
+    runtime, tmp_path
+):
     import aiosqlite
     from core.database.database import Database
     from core.database.schema import initialize_database
@@ -294,17 +306,29 @@ async def test_controls_persist_across_database_reopen_and_block_all_tests(runti
     try:
         await initialize_database(conn)
         runtime.plugin.db = Database(conn)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(runtime.app), base_url="http://test") as client:
-            disabled = await client.post("/models/settings", json={"provider_id": "shared", "enabled": False})
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+        ) as client:
+            disabled = await client.post(
+                "/models/settings", json={"provider_id": "shared", "enabled": False}
+            )
             assert disabled.json()["status"] == "success"
-            row = next(row for row in disabled.json()["data"]["models"] if row["provider_id"] == "shared")
+            row = next(
+                row
+                for row in disabled.json()["data"]["models"]
+                if row["provider_id"] == "shared"
+            )
             assert row["status"] == "disabled" and row["enabled"] is False
             response = await client.post("/models/test", json={"provider_id": "shared"})
-            assert response.status_code == 400 and "手动停用" in response.json()["message"]
+            assert (
+                response.status_code == 400 and "手动停用" in response.json()["message"]
+            )
             off = await client.post("/models/settings", json={"enabled": False})
             assert off.json()["data"]["enabled"] is False
             response = await client.post("/models/test", json={"provider_id": "reply"})
-            assert response.status_code == 400 and "已关闭" in response.json()["message"]
+            assert (
+                response.status_code == 400 and "已关闭" in response.json()["message"]
+            )
         runtime.plugin.context.llm_generate.assert_not_awaited()
     finally:
         await conn.close()
@@ -325,9 +349,22 @@ async def test_controls_persist_across_database_reopen_and_block_all_tests(runti
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [[], {}, {"enabled": "false"}, {"enabled": 0}, {"enabled": False, "provider_id": "unused"}, {"enabled": True, "provider_id": None}, {"enabled": False, "provider_id": ["shared"]}])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {},
+        {"enabled": "false"},
+        {"enabled": 0},
+        {"enabled": False, "provider_id": "unused"},
+        {"enabled": True, "provider_id": None},
+        {"enabled": False, "provider_id": ["shared"]},
+    ],
+)
 async def test_invalid_control_updates_are_rejected(runtime, payload):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(runtime.app), base_url="http://test") as client:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
         response = await client.post("/models/settings", json=payload)
     assert response.status_code == 400
     runtime.plugin.db.upsert_kv_data.assert_not_awaited()
@@ -338,8 +375,12 @@ async def test_invalid_control_updates_are_rejected(runtime, payload):
 @pytest.mark.asyncio
 async def test_failed_persistence_does_not_change_runtime_controls(runtime):
     runtime.plugin.db.upsert_kv_data.side_effect = RuntimeError("Database unavailable")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(runtime.app), base_url="http://test") as client:
-        response = await client.post("/models/settings", json={"provider_id": "shared", "enabled": False})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/models/settings", json={"provider_id": "shared", "enabled": False}
+        )
     assert response.status_code == 400
     assert "保存" in response.json()["message"]
     assert runtime.health.snapshot("shared")["enabled"] is True
@@ -351,8 +392,18 @@ async def test_concurrent_updates_keep_both_disabled_providers(runtime):
         await asyncio.sleep(0.01)
 
     runtime.plugin.db.upsert_kv_data.side_effect = save
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(runtime.app), base_url="http://test") as client:
-        results = await asyncio.gather(*[client.post("/models/settings", json={"provider_id": provider_id, "enabled": False}) for provider_id in ("shared", "reply")])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
+        results = await asyncio.gather(
+            *[
+                client.post(
+                    "/models/settings",
+                    json={"provider_id": provider_id, "enabled": False},
+                )
+                for provider_id in ("shared", "reply")
+            ]
+        )
     assert all(response.json()["status"] == "success" for response in results)
     assert runtime.health.disabled_provider_ids == {"shared", "reply"}
     saved = json.loads(runtime.plugin.db.upsert_kv_data.await_args.args[1])
@@ -362,8 +413,12 @@ async def test_concurrent_updates_keep_both_disabled_providers(runtime):
 @pytest.mark.asyncio
 async def test_invalid_manual_probe_reports_safe_reason_and_enters_cooldown(runtime):
     runtime.plugin.context.llm_generate.side_effect = None
-    runtime.plugin.context.llm_generate.return_value = SimpleNamespace(completion_text="\x00sk-secret-never-publish�")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(runtime.app), base_url="http://test") as client:
+    runtime.plugin.context.llm_generate.return_value = SimpleNamespace(
+        completion_text="\x00sk-secret-never-publish�"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
         response = await client.post("/models/test", json={"provider_id": "shared"})
     body = response.json()
     assert body["status"] == "error"
@@ -374,7 +429,9 @@ async def test_invalid_manual_probe_reports_safe_reason_and_enters_cooldown(runt
 
 
 @pytest.mark.asyncio
-async def test_disabling_during_manual_probe_cancels_request_and_keeps_disabled(runtime):
+async def test_disabling_during_manual_probe_cancels_request_and_keeps_disabled(
+    runtime,
+):
     entered, cancelled = asyncio.Event(), asyncio.Event()
 
     async def generate(**kwargs):
@@ -385,10 +442,16 @@ async def test_disabling_during_manual_probe_cancels_request_and_keeps_disabled(
             cancelled.set()
 
     runtime.plugin.context.llm_generate.side_effect = generate
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(runtime.app), base_url="http://test") as client:
-        pending = asyncio.create_task(client.post("/models/test", json={"provider_id": "shared"}))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
+        pending = asyncio.create_task(
+            client.post("/models/test", json={"provider_id": "shared"})
+        )
         await entered.wait()
-        response = await client.post("/models/settings", json={"provider_id": "shared", "enabled": False})
+        response = await client.post(
+            "/models/settings", json={"provider_id": "shared", "enabled": False}
+        )
         assert response.json()["status"] == "success"
         assert (await pending).status_code == 400
     assert cancelled.is_set()

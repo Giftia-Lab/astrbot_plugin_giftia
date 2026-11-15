@@ -173,6 +173,7 @@ function openBotEditModal(botName = null) {
         adapter_ids: [],
         decision_conf: {
             provider_ids: [],
+            session_completion_provider_id: '',
             group_whitelist_mode: 'blacklist',
             group_whitelist: [],
             private_whitelist_mode: 'whitelist',
@@ -235,6 +236,9 @@ function openBotEditModal(botName = null) {
         availableOptions: stateBotMetadata.llm_providers || [],
         selectedValues: bot.decision_conf?.provider_ids || []
     });
+    renderSingleProviderSelect('bot-form-session-completion-provider',
+        stateBotMetadata.decision_providers || [],
+        bot.decision_conf?.session_completion_provider_id || '');
 
     const atBehaviorEl = document.getElementById('bot-form-dec-at-behavior');
     if (atBehaviorEl) atBehaviorEl.value = bot.decision_conf?.at_behavior || 'force_reply';
@@ -747,6 +751,7 @@ async function saveBotFromModal() {
         adapter_ids: adapterIds,
         decision_conf: {
             provider_ids: decSelectedProviders,
+            session_completion_provider_id: document.getElementById('bot-form-session-completion-provider').value,
             group_whitelist_mode: document.getElementById('bot-form-dec-list-mode')?.value || 'blacklist',
             group_whitelist: document.getElementById('bot-form-dec-whitelist').value.split(',').map(s => s.trim()).filter(s => s),
             private_whitelist_mode: document.getElementById('bot-form-private-list-mode').value,

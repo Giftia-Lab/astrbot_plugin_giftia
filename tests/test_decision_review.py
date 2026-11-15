@@ -257,6 +257,85 @@ async def test_decision_review_timeout_is_not_a_rejection(decision_runtime):
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "probability,expected", [(0, False), (0.79, False), (0.8, True), (1, True)]
+)
+async def test_session_completion_uses_conservative_decision_threshold(
+    decision_runtime, probability, expected
+):
+    runtime = decision_runtime
+    runtime.probability = probability
+    assert (
+        await runtime.caller.call_llm_session_completion(
+            "review", "recent conversation and pending input", "bot", "group"
+        )
+        is expected
+    )
+    assert len(runtime.requests) == 1
+    body = runtime.requests[0]
+    assert (
+        body.get("state", body.get("input")) == "recent conversation and pending input"
+    )
+    questions = body["questions"]
+    question = questions[0] if isinstance(questions, list) else questions["answer"]
+    assert "是否已经表达完整" in question["instructions"]
+    assert "不判断机器人是否应该回复" in question["instructions"]
+    runtime.context.llm_generate.assert_not_awaited()
+    usage = runtime.caller._log_token_usage_safely.await_args.kwargs
+    assert usage["type_name"] == "session_completion"
+    assert usage["extra_info"]["completed"] is expected
+    assert usage["extra_info"]["elapsed_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probability", [-0.1, None, "true"])
+async def test_invalid_completion_verdict_keeps_original_wait_without_retry(
+    decision_runtime, probability
+):
+    runtime = decision_runtime
+    runtime.probability = probability
+    assert (
+        await runtime.caller.call_llm_session_completion(
+            "review", "input", "bot", "group"
+        )
+        is None
+    )
+    assert len(runtime.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("management_enabled", [True, False])
+async def test_disabled_completion_provider_skips_request(
+    decision_runtime, management_enabled
+):
+    runtime = decision_runtime
+    runtime.health.enabled = management_enabled
+    runtime.health.disabled_provider_ids.add("review")
+    assert (
+        await runtime.caller.call_llm_session_completion(
+            "review", "input", "bot", "group"
+        )
+        is None
+    )
+    assert runtime.requests == []
+    runtime.caller._log_token_usage_safely.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_completion_timeout_keeps_original_wait_without_retry(decision_runtime):
+    runtime = decision_runtime
+    runtime.context.decision.yes_no = AsyncMock(side_effect=TimeoutError())
+    assert (
+        await runtime.caller.call_llm_session_completion(
+            "review", "input", "bot", "group"
+        )
+        is None
+    )
+    runtime.context.decision.yes_no.assert_awaited_once()
+    assert runtime.context.decision.yes_no.await_args.kwargs["threshold"] == 0.8
+
+
 @pytest.mark.parametrize("runtime_only", [True, False])
 def test_metadata_keeps_decision_providers_out_of_chat_inventory(runtime_only):
     configured = [

@@ -15,6 +15,8 @@ const staticTypeColors = {
     'reply_review_tokens': '#0ea5e9',
     'decision': '#10b981',
     'decision_tokens': '#10b981',
+    'session_completion': '#d97706',
+    'session_completion_tokens': '#d97706',
     'image_caption': '#f59e0b',
     'image_caption_tokens': '#f59e0b',
     'sticker_analysis': '#14b8a6',
@@ -207,6 +209,7 @@ function renderChartAndProgressBars() {
                     'reply': '正式回复',
                     'reply_review': '回复复审',
                     'decision': '前置决策',
+                    'session_completion': '会话防抖判断',
                     'image_caption': '图片转述',
                     'sticker_analysis': '表情包分析',
                     'audio_caption': '音频转述',
@@ -275,6 +278,7 @@ function renderChartAndProgressBars() {
                                         'reply': '正式回复',
                                         'reply_review': '回复复审',
                                         'decision': '前置决策',
+                                        'session_completion': '会话防抖判断',
                                         'image_caption': '图片转述',
                                         'sticker_analysis': '表情包分析',
                                         'audio_caption': '音频转述',
@@ -388,6 +392,7 @@ function renderChartAndProgressBars() {
             { key: 'reply_tokens', name: '正式回复', class: 'reply' },
             { key: 'reply_review_tokens', name: '回复复审', class: 'reply_review' },
             { key: 'decision_tokens', name: '前置决策', class: 'decision' },
+            { key: 'session_completion_tokens', name: '会话防抖判断', class: 'session_completion' },
             { key: 'image_caption_tokens', name: '图片转述', class: 'image_caption' },
             { key: 'sticker_analysis_tokens', name: '表情包分析', class: 'sticker_analysis' },
             { key: 'audio_caption_tokens', name: '音频转述', class: 'audio_caption' },
@@ -408,6 +413,8 @@ function renderChartAndProgressBars() {
                     hoverTitle = `输入 (Prompt): ${Number(summary.reply_review_prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(summary.reply_review_completion_tokens || 0).toLocaleString()}`;
                 } else if (cat.key === 'decision_tokens') {
                     hoverTitle = `输入 (Prompt): ${Number(summary.decision_prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(summary.decision_completion_tokens || 0).toLocaleString()}`;
+                } else if (cat.key === 'session_completion_tokens') {
+                    hoverTitle = `输入 (Prompt): ${Number(summary.session_completion_prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(summary.session_completion_completion_tokens || 0).toLocaleString()}`;
                 }
                 const barColor = getColorForKey(cat.class);
                 return `

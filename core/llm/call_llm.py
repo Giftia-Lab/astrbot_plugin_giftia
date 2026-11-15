@@ -1,4 +1,5 @@
 import json
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from xml.etree.ElementTree import fromstring
@@ -33,6 +34,7 @@ from .preset_prompts import (
     REPLY_CONTEXT_GUIDE,
     REPLY_REVIEW_PROMPT,
     REPLY_REVIEW_RULES,
+    SESSION_COMPLETION_QUESTION,
     build_xml_instructions,
     get_audio_caption_prompt,
     get_decision_rules,
@@ -216,6 +218,73 @@ class CallLLM:
                     )
                     continue
         return None
+
+    async def call_llm_session_completion(
+        self,
+        provider_id: str,
+        user_prompt: str,
+        bot_name: str,
+        group_or_user_id: str,
+    ) -> bool | None:
+        """Check expression completeness once without changing message state.
+
+        Args:
+            provider_id: Explicitly selected decision provider.
+            user_prompt: Recent conversation and the pending input snapshot.
+            bot_name: Owning bot configuration.
+            group_or_user_id: Owning conversation.
+
+        Returns:
+            True to shorten aggregation, False to keep waiting, or None on failure.
+        """
+        started = time.monotonic()
+        completed = None
+        response = None
+        extra_info = {"status": "api_failed", "provider_type": "decision"}
+        try:
+            response = await self.provider_health.call(
+                self.context.decision.yes_no,
+                chat_provider_id=provider_id,
+                decision=True,
+                question=SESSION_COMPLETION_QUESTION,
+                state=user_prompt,
+                threshold=0.8,
+                request_timeout=2,
+            )
+            extra_info["status"] = "parse_failed"
+            if not isinstance(response, bool):
+                raise ValueError("Invalid session completion verdict")
+            completed = response
+            extra_info.update(status="success", completed=completed)
+        except ProviderUnavailableError:
+            return None
+        except Exception as error:
+            extra_info.update(error=str(error), error_type=type(error).__name__)
+            logger.warning(
+                "[Giftia] Session completion unavailable for %s:%s; "
+                "keeping the original deadline: provider=%s, error=%r",
+                bot_name,
+                group_or_user_id,
+                provider_id,
+                error,
+            )
+        extra_info["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        logger.info(
+            "[Giftia] Session completion for %s:%s: completed=%s, elapsed=%.3fs",
+            bot_name,
+            group_or_user_id,
+            completed,
+            extra_info["elapsed_seconds"],
+        )
+        await self._log_token_usage_safely(
+            bot_name=bot_name,
+            group_or_user_id=group_or_user_id,
+            type_name="session_completion",
+            provider_id=provider_id,
+            llm_resp=response,
+            extra_info=extra_info,
+        )
+        return completed
 
     async def call_llm_reply_review(
         self,
