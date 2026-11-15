@@ -54,10 +54,11 @@
 
 .token-stat-info {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     font-size: 0.85rem;
     margin-bottom: 4px;
-    gap: 12px;
+    gap: 6px 12px;
 }
 
 .token-stat-info.align-center {
@@ -73,10 +74,12 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-    flex: 1;
+    flex: 1 1 180px;
 }
 
 .token-stat-name {
+    min-width: 0;
+    max-width: 100%;
     font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -105,8 +108,14 @@
 
 /* Values and percentage numbers */
 .token-stat-value {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-left: auto;
+    max-width: 100%;
     color: var(--font-secondary);
-    white-space: nowrap;
+    text-align: right;
+    overflow-wrap: anywhere;
     flex-shrink: 0;
     font-family: 'Fira Code', monospace, sans-serif;
     font-size: 0.8rem;
@@ -117,8 +126,9 @@
     font-family: inherit;
 }
 
-.token-stat-value.margin-left {
-    margin-left: 12px;
+.token-stat-calls {
+    font-size: 0.72rem;
+    font-family: inherit;
 }
 
 /* Shared progress bar background and fill */
