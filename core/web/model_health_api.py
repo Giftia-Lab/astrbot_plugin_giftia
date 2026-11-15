@@ -55,6 +55,8 @@ class ModelHealthApi:
                     )
             if provider_id := reply.get("review_provider_id"):
                 uses.setdefault(provider_id, []).append(f"{bot_name} · 回复复审")
+            if provider_id := decision.get("session_completion_provider_id"):
+                uses.setdefault(provider_id, []).append(f"{bot_name} · 会话防抖判断")
 
         captions = self.giftia.caption_config
         for provider_ids, label in (

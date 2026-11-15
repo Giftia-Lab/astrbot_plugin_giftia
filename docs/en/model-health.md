@@ -8,7 +8,7 @@ Each provider/model has one displayed name. Usage stays on one line until **展�
 
 ![Mobile model status with expanded usage](../images/model-health-mobile.png)
 
-Decisions, formal replies, invalid-output fallback, reply review, image/audio/video captions, sticker analysis, media inspection, memory and affinity summaries, and forwarded-message summaries share one in-memory health tracker keyed by AstrBot `provider_id`. Different configurations with the same model name have independent health. Provider configuration and ordering are preserved. Embeddings, reranking and TTS are outside this conversation-model view.
+Decisions, session completion checks, formal replies, invalid-output fallback, reply review, image/audio/video captions, sticker analysis, media inspection, memory and affinity summaries, and forwarded-message summaries share one in-memory health tracker keyed by AstrBot `provider_id`. Different configurations with the same model name have independent health. Provider configuration and ordering are preserved. Embeddings, reranking and TTS are outside this conversation-model view.
 
 ## Management switch and manual disabling
 
@@ -23,14 +23,15 @@ Both controls are saved automatically in the plugin database and survive restart
 - Two consecutive recognized connection failures, model request timeouts or server-side 5xx errors start a 60-second cooldown. A successful request clears the failure counter.
 - Rate limits start cooldown immediately and honor upstream `Retry-After`. Recognized authentication, missing-model, credit and quota errors use at least ten minutes.
 - Every flow skips unavailable providers during cooldown, while waiting for a probe, and during recovery tests, moving to the next provider in its **current list**. Skipped business calls consume no API request or token record, do not trigger invalid-output fallback, and never wait for a probe.
-- With management enabled, a background task sends a short request after cooldown, asking for an exact copy of a fresh random `GIFTIA_PROBE_…` challenge. It has a 30-second timeout and no tools or conversation history. Failed providers are checked even without business traffic. Healthy, untested and manually disabled providers are not periodically tested.
+- With management enabled, a background task sends a short request for chat providers after cooldown, asking for an exact copy of a fresh random `GIFTIA_PROBE_…` challenge. It has a 30-second timeout and no tools or conversation history. Failed providers are checked even without business traffic. Healthy, untested and manually disabled providers are not periodically tested.
+- Decision providers use the shared decision service for structured connectivity tests: select the one of two fresh random markers that exactly matches the test state. Wrong choices or invalid structures cannot restore health. These tests require no text or XML generation; token usage absent from the decision API is marked as missing.
 - Automatic and manual tests share one probe slot per provider. Different providers run independently, so a slow endpoint cannot delay another provider's recovery.
-- A reply must exactly match the current challenge, allowing only surrounding ASCII spaces, tabs and line breaks. Empty output, gibberish, a fixed `OK`, old challenges, explanations, Markdown, quotes and hidden characters fail validation and cannot restore health. A failed probe starts or extends cooldown, with subsequent delays of two, five and ten minutes. The calculated cooldown is capped at ten minutes; longer upstream delays are honored.
+- A chat-provider reply must exactly match the current challenge, allowing only surrounding ASCII spaces, tabs and line breaks. Empty output, gibberish, a fixed `OK`, old challenges, explanations, Markdown, quotes and hidden characters fail validation and cannot restore health. A failed probe starts or extends cooldown, with subsequent delays of two, five and ten minutes. The calculated cooldown is capped at ten minutes; longer upstream delays are honored.
 - Provider instance or configuration changes are checked on the next request. Restarting the plugin clears runtime health history. Unloading the plugin cancels and awaits its background probes.
 
 Empty output, invalid XML/JSON, safety refusals, bad request parameters, context limits and local processing errors do not establish a provider outage. Health is updated at the model request boundary, before business parsing. Errors after native tool execution starts are excluded from this model's failure counter, and the existing protection against replaying tool effects remains in place.
 
-Health admission precedes existing retry rules: request errors stay within the current list, invalid primary replies enter the separate fallback list, and invalid fallback replies end the reply. An empty fallback configuration preserves legacy output handling. If no candidate is available, each flow keeps its existing failure behavior; unavailable reply reviews still allow the draft through.
+Health admission precedes existing retry rules: request errors stay within the current list, invalid primary replies enter the separate fallback list, and invalid fallback replies end the reply. An empty fallback configuration preserves legacy output handling. If no candidate is available, each flow keeps its existing failure behavior; unavailable reply reviews still allow the draft through, and unavailable session completion checks preserve the original aggregation deadline.
 
 ## Connectivity tests
 

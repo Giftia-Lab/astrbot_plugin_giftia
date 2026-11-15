@@ -45,6 +45,8 @@ from .reply_pipeline import ReplyPipeline, ReplyReviewRejected
 
 SESSION_MIN_INTERVAL = 2.0
 SESSION_BATCH_LIMIT = 50
+SESSION_COMPLETION_SILENCE = 1.0
+SESSION_COMPLETION_MIN_REMAINING = 3.0
 # Minimum message count, minimum body characters, and seconds to wait.
 SESSION_WAIT_STEPS = (
     (12, 161, 0.8),
@@ -666,6 +668,196 @@ class ChatManager:
                 status,
             )
 
+    async def _check_session_completion(
+        self,
+        bot_name: str,
+        group_or_user_id: str,
+        provider_id: str,
+        pending: list[QueuedMessage],
+    ) -> bool | None:
+        """Build a small read-only snapshot for the optional decision provider.
+
+        Args:
+            bot_name: Owning bot configuration.
+            group_or_user_id: Stored conversation identifier.
+            provider_id: Selected decision provider.
+            pending: Ready messages covered by this check.
+
+        Returns:
+            The completeness verdict, or None when context or inference fails.
+        """
+        try:
+            recent = await self.plugin.data_cache.get_recent_message(
+                bot_name, group_or_user_id, 12 + len(pending)
+            )
+            pending_ids = {item.message.message_id for item in pending}
+            recent = [
+                message
+                for message in recent
+                if message.message_id not in pending_ids
+                and not message.is_recalled
+                and message.role != "operation_log"
+            ][-12:]
+            now = time.monotonic()
+            context = {
+                "bot_user_id": str(pending[-1].event.get_self_id()),
+                "bot_nickname": self.plugin.bot_map[bot_name].get("nickname", bot_name),
+                "quiet_seconds": round(max(0, now - pending[-1].arrived_at), 3),
+                "recent_messages": [
+                    parse_message_to_str(
+                        replace(message, content=escape(message.content)),
+                        truncate_limit=300,
+                    )
+                    for message in recent
+                ],
+                "pending_messages": [
+                    {
+                        "seconds_ago": round(max(0, now - item.arrived_at), 3),
+                        "message": parse_message_to_str(
+                            replace(item.message, content=escape(item.message.content)),
+                            truncate_limit=300,
+                        ),
+                    }
+                    for item in pending
+                ],
+            }
+            return await self.plugin.call_llm.call_llm_session_completion(
+                provider_id=provider_id,
+                user_prompt=json.dumps(context, ensure_ascii=False),
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
+            )
+        except Exception:
+            logger.warning(
+                "[Giftia] Session completion check failed for %s:%s; "
+                "keeping the original deadline",
+                bot_name,
+                group_or_user_id,
+                exc_info=True,
+            )
+            return None
+
+    async def _wait_for_session_batch(
+        self,
+        bot_name: str,
+        group_or_user_id: str,
+        state: SessionState,
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """Race optional completion checks against the original batch deadline.
+
+        Args:
+            bot_name: Owning bot configuration.
+            group_or_user_id: Stored conversation identifier.
+            state: Queue and timing state owned by the current worker.
+
+        Returns:
+            The approved provider and message IDs for an early batch, or None
+            when the original deadline expires.
+        """
+        check_task: asyncio.Task | None = None
+        task_snapshot = checked_snapshot = approved_snapshot = None
+        cancellation_requested = False
+        try:
+            while state.pending and not getattr(self.plugin, "_terminated", False):
+                state.wake.clear()
+                pending_count = len(state.pending)
+                characters = (
+                    sum(item.text_length for item in state.pending)
+                    if pending_count < SESSION_WAIT_STEPS[0][0]
+                    else 0
+                )
+                wait_seconds = next(
+                    seconds
+                    for count, length, seconds in SESSION_WAIT_STEPS
+                    if pending_count >= count or characters >= length
+                )
+                now = time.monotonic()
+                # Arrivals only shorten the first ready message's deadline.
+                ready_at = max(
+                    state.pending[0].arrived_at + wait_seconds,
+                    state.last_started + SESSION_MIN_INTERVAL,
+                )
+                remaining = ready_at - now
+                if remaining <= 0:
+                    return None
+
+                provider_id = (
+                    self.plugin.bot_map[bot_name]
+                    .get("decision_conf", {})
+                    .get("session_completion_provider_id", "")
+                )
+                snapshot = (
+                    provider_id,
+                    tuple(item.message.message_id for item in state.pending)
+                    if provider_id or check_task is not None
+                    else (),
+                )
+                if check_task is not None:
+                    if check_task.done():
+                        completed = (
+                            not check_task.cancelled() and check_task.result() is True
+                        )
+                        if completed and task_snapshot == snapshot:
+                            approved_snapshot = snapshot
+                            logger.info(
+                                "[Giftia] Shortened session wait for %s:%s: "
+                                "messages=%d, saved_wait=%.3fs",
+                                bot_name,
+                                group_or_user_id,
+                                pending_count,
+                                max(
+                                    0,
+                                    ready_at
+                                    - max(
+                                        now, state.last_started + SESSION_MIN_INTERVAL
+                                    ),
+                                ),
+                            )
+                        check_task = None
+                    elif task_snapshot != snapshot and not cancellation_requested:
+                        # Keep one in-flight slot until cancellation completes;
+                        # cleanup must not block the original aggregation timer.
+                        check_task.cancel()
+                        cancellation_requested = True
+
+                if approved_snapshot == snapshot:
+                    remaining = state.last_started + SESSION_MIN_INTERVAL - now
+                    if remaining <= 0:
+                        return approved_snapshot
+                elif (
+                    provider_id
+                    and wait_seconds >= 6
+                    and remaining > SESSION_COMPLETION_MIN_REMAINING
+                    and checked_snapshot != snapshot
+                    and check_task is None
+                ):
+                    silence_remaining = (
+                        state.pending[-1].arrived_at + SESSION_COMPLETION_SILENCE - now
+                    )
+                    if silence_remaining > 0:
+                        remaining = min(remaining, silence_remaining)
+                    else:
+                        checked_snapshot = task_snapshot = snapshot
+                        cancellation_requested = False
+                        check_task = asyncio.create_task(
+                            self._check_session_completion(
+                                bot_name,
+                                group_or_user_id,
+                                provider_id,
+                                list(state.pending),
+                            )
+                        )
+                        check_task.add_done_callback(lambda _: state.wake.set())
+                try:
+                    await asyncio.wait_for(state.wake.wait(), remaining)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if check_task is not None:
+                check_task.cancel()
+                await asyncio.gather(check_task, return_exceptions=True)
+        return None
+
     async def _run_session(
         self,
         bot_name: str,
@@ -683,35 +875,11 @@ class ChatManager:
         batch_limit = min(SESSION_BATCH_LIMIT, getattr(self.plugin, "msg_number", 200))
         try:
             while state.pending and not getattr(self.plugin, "_terminated", False):
-                state.wake.clear()
-                pending_count = len(state.pending)
-                # Twelve ready messages already select the shortest wait. Avoid
-                # rescanning a large backlog while the previous reply is running.
-                characters = (
-                    sum(item.text_length for item in state.pending)
-                    if pending_count < SESSION_WAIT_STEPS[0][0]
-                    else 0
-                )
-                wait_seconds = next(
-                    seconds
-                    for count, length, seconds in SESSION_WAIT_STEPS
-                    if pending_count >= count or characters >= length
-                )
-                # The first ready message anchors the deadline. More content can
-                # only bring it forward, including arrivals during a model call.
-                ready_at = max(
-                    state.pending[0].arrived_at + wait_seconds,
-                    state.last_started + SESSION_MIN_INTERVAL,
-                )
-                remaining = ready_at - time.monotonic()
-                if review_retry is not None:
-                    remaining = 0
-                if remaining > 0:
-                    try:
-                        await asyncio.wait_for(state.wake.wait(), remaining)
-                    except asyncio.TimeoutError:
-                        pass
-                    continue
+                completion_snapshot = None
+                if review_retry is None:
+                    completion_snapshot = await self._wait_for_session_batch(
+                        bot_name, group_or_user_id, state
+                    )
 
                 event = state.pending[0].event
                 parse_key = f"{bot_name}:{event.unified_msg_origin}"
@@ -728,6 +896,21 @@ class ChatManager:
                     )
                     try:
                         async with self.plugin.parse_locks[parse_key]:
+                            if (
+                                completion_snapshot is not None
+                                and completion_snapshot
+                                != (
+                                    self.plugin.bot_map[bot_name]
+                                    .get("decision_conf", {})
+                                    .get("session_completion_provider_id", ""),
+                                    tuple(
+                                        item.message.message_id
+                                        for item in state.pending
+                                    ),
+                                )
+                            ):
+                                # Input can arrive while the shared lock is busy.
+                                continue
                             batch_size = min(batch_limit, len(state.pending))
                             recent = await self.plugin.data_cache.get_recent_message(
                                 bot_name,

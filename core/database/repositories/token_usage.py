@@ -162,7 +162,8 @@ class TokenUsageRepository(BaseRepository):
                 SELECT group_or_user_id, provider_id, model_name, type,
                        SUM(prompt_tokens) as prompt,
                        SUM(completion_tokens) as completion,
-                       SUM(total_tokens) as total
+                       SUM(total_tokens) as total,
+                       SUM(COALESCE(call_count, 1)) as calls
                 FROM token_usage
                 {where_usage}
                 GROUP BY group_or_user_id, provider_id, model_name, type
@@ -173,13 +174,16 @@ class TokenUsageRepository(BaseRepository):
                 SELECT group_or_user_id, provider_id, model_name, type,
                        SUM(prompt_tokens) as prompt,
                        SUM(completion_tokens) as completion,
-                       SUM(total_tokens) as total
+                       SUM(total_tokens) as total,
+                       SUM(COALESCE(call_count, 0)) as calls
                 FROM token_daily_stats
                 {where_daily}
                 GROUP BY group_or_user_id, provider_id, model_name, type
             """
 
-            merged = defaultdict(lambda: {"prompt": 0, "completion": 0, "total": 0})
+            merged = defaultdict(
+                lambda: {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+            )
 
             async with self.conn.execute(sql_usage, params_usage) as cursor:
                 rows = await cursor.fetchall()
@@ -193,6 +197,7 @@ class TokenUsageRepository(BaseRepository):
                     merged[key]["prompt"] += r["prompt"] or 0
                     merged[key]["completion"] += r["completion"] or 0
                     merged[key]["total"] += r["total"] or 0
+                    merged[key]["calls"] += r["calls"] or 0
 
             async with self.conn.execute(sql_daily, params_daily) as cursor:
                 rows = await cursor.fetchall()
@@ -206,8 +211,10 @@ class TokenUsageRepository(BaseRepository):
                     merged[key]["prompt"] += r["prompt"] or 0
                     merged[key]["completion"] += r["completion"] or 0
                     merged[key]["total"] += r["total"] or 0
+                    merged[key]["calls"] += r["calls"] or 0
 
             summary = {
+                "total_calls": 0,
                 "total_tokens": 0,
                 "total_prompt_tokens": 0,
                 "total_completion_tokens": 0,
@@ -215,6 +222,9 @@ class TokenUsageRepository(BaseRepository):
                 "decision_tokens": 0,
                 "decision_prompt_tokens": 0,
                 "decision_completion_tokens": 0,
+                "session_completion_tokens": 0,
+                "session_completion_prompt_tokens": 0,
+                "session_completion_completion_tokens": 0,
                 "reply_tokens": 0,
                 "reply_prompt_tokens": 0,
                 "reply_completion_tokens": 0,
@@ -228,9 +238,15 @@ class TokenUsageRepository(BaseRepository):
                 "sticker_analysis_tokens": 0,
             }
 
-            group_map = defaultdict(lambda: {"tokens": 0, "tts_chars": 0})
+            group_map = defaultdict(lambda: {"tokens": 0, "tts_chars": 0, "calls": 0})
             model_map = defaultdict(
-                lambda: {"prompt": 0, "completion": 0, "total": 0, "tts_chars": 0}
+                lambda: {
+                    "prompt": 0,
+                    "completion": 0,
+                    "total": 0,
+                    "tts_chars": 0,
+                    "calls": 0,
+                }
             )
 
             for key, val in merged.items():
@@ -238,6 +254,9 @@ class TokenUsageRepository(BaseRepository):
                 prompt = val["prompt"]
                 completion = val["completion"]
                 total = val["total"]
+                calls = val["calls"]
+                calls_key = f"{type_name}_calls"
+                summary[calls_key] = summary.get(calls_key, 0) + calls
 
                 norm_provider_id = provider_id
                 norm_model_name = model_name
@@ -247,16 +266,19 @@ class TokenUsageRepository(BaseRepository):
                     norm_model_name = "/".join(parts[1:])
 
                 if type_name != "tts":
+                    summary["total_calls"] += calls
                     summary["total_tokens"] += total
                     summary["total_prompt_tokens"] += prompt
                     summary["total_completion_tokens"] += completion
 
                     group_map[group_id]["tokens"] += total
+                    group_map[group_id]["calls"] += calls
                     model_map[(norm_provider_id, norm_model_name)]["prompt"] += prompt
                     model_map[(norm_provider_id, norm_model_name)]["completion"] += (
                         completion
                     )
                     model_map[(norm_provider_id, norm_model_name)]["total"] += total
+                    model_map[(norm_provider_id, norm_model_name)]["calls"] += calls
                 else:
                     summary["total_chars_tts"] += total
                     summary["tts_chars"] += total
@@ -276,6 +298,10 @@ class TokenUsageRepository(BaseRepository):
                     summary["reply_review_tokens"] += total
                     summary["reply_review_prompt_tokens"] += prompt
                     summary["reply_review_completion_tokens"] += completion
+                elif type_name == "session_completion":
+                    summary["session_completion_tokens"] += total
+                    summary["session_completion_prompt_tokens"] += prompt
+                    summary["session_completion_completion_tokens"] += completion
                 elif type_name == "image_caption":
                     summary["image_caption_tokens"] += total
                 elif type_name == "audio_caption":
@@ -292,13 +318,14 @@ class TokenUsageRepository(BaseRepository):
                         "group_or_user_id": gid or "私聊/系统",
                         "total_tokens": gval["tokens"],
                         "total_chars_tts": gval["tts_chars"],
+                        "call_count": gval["calls"],
                     }
                 )
             by_group.sort(key=lambda x: x["total_tokens"], reverse=True)
 
             by_model = []
             for (provider_id, model_name), mval in model_map.items():
-                if mval["total"] > 0:
+                if mval["total"] > 0 or mval["calls"] > 0:
                     by_model.append(
                         {
                             "provider_id": provider_id or None,
@@ -307,6 +334,7 @@ class TokenUsageRepository(BaseRepository):
                             "completion_tokens": mval["completion"],
                             "total_tokens": mval["total"],
                             "total_chars_tts": mval["tts_chars"],
+                            "call_count": mval["calls"],
                         }
                     )
             by_model.sort(key=lambda x: x["total_tokens"], reverse=True)

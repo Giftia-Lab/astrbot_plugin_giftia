@@ -9,6 +9,7 @@ const sanitizeId = (str) => String(str || '').replace(/[^a-zA-Z0-9_-]/g, '_');
 let stateBots = [];
 let stateBotMetadata = {
     llm_providers: [],
+    decision_providers: [],
     tts_providers: [],
     adapters: [],
     interactive_features: []
@@ -172,6 +173,7 @@ function openBotEditModal(botName = null) {
         adapter_ids: [],
         decision_conf: {
             provider_ids: [],
+            session_completion_provider_id: '',
             group_whitelist_mode: 'blacklist',
             group_whitelist: [],
             private_whitelist_mode: 'whitelist',
@@ -234,6 +236,9 @@ function openBotEditModal(botName = null) {
         availableOptions: stateBotMetadata.llm_providers || [],
         selectedValues: bot.decision_conf?.provider_ids || []
     });
+    renderSingleProviderSelect('bot-form-session-completion-provider',
+        stateBotMetadata.decision_providers || [],
+        bot.decision_conf?.session_completion_provider_id || '');
 
     const atBehaviorEl = document.getElementById('bot-form-dec-at-behavior');
     if (atBehaviorEl) atBehaviorEl.value = bot.decision_conf?.at_behavior || 'force_reply';
@@ -263,7 +268,12 @@ function openBotEditModal(botName = null) {
     });
 
     document.getElementById('bot-form-reply-mode').value = bot.llm_reply_conf?.provider_selection_mode || 'fallback';
-    renderSingleProviderSelect('bot-form-review-provider', stateBotMetadata.llm_providers, bot.llm_reply_conf?.review_provider_id || '');
+    renderSingleProviderSelect('bot-form-review-provider', [
+        ...(stateBotMetadata.llm_providers || []),
+        ...(stateBotMetadata.decision_providers || []).map(p => ({
+            ...p, name: `${p.name || p.id}（决策模型）`
+        }))
+    ], bot.llm_reply_conf?.review_provider_id || '');
 
     // 4. TTS Conf
     document.getElementById('bot-form-tts-enabled').checked = bot.tts_config?.enabled === true;
@@ -741,6 +751,7 @@ async function saveBotFromModal() {
         adapter_ids: adapterIds,
         decision_conf: {
             provider_ids: decSelectedProviders,
+            session_completion_provider_id: document.getElementById('bot-form-session-completion-provider').value,
             group_whitelist_mode: document.getElementById('bot-form-dec-list-mode')?.value || 'blacklist',
             group_whitelist: document.getElementById('bot-form-dec-whitelist').value.split(',').map(s => s.trim()).filter(s => s),
             private_whitelist_mode: document.getElementById('bot-form-private-list-mode').value,

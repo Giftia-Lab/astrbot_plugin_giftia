@@ -6,8 +6,55 @@ import pytest
 from core.bot.bot_config_manager import DEFAULT_BOT_CONFIG, BotConfigManager
 from core.conversation.decision_engine import DecisionEngine
 from core.utils.schemas import Decision, MessageData, Status
+from core.web import bot_api as bot_api_module
+from core.web.bot_api import BotApi
 
 from astrbot.api.message_components import At
+
+
+@pytest.mark.parametrize(
+    "value,expected", [(None, ""), ("", ""), (" completion ", "completion")]
+)
+def test_optional_session_completion_provider_round_trip(tmp_path, value, expected):
+    manager = BotConfigManager.__new__(BotConfigManager)
+    manager.config_file = tmp_path / "bots_config.json"
+    assert DEFAULT_BOT_CONFIG["decision_conf"]["session_completion_provider_id"] == ""
+    assert manager.save_bots(
+        [{"name": "bot", "decision_conf": {"session_completion_provider_id": value}}]
+    )
+    assert (
+        manager.load_bots()[0]["decision_conf"]["session_completion_provider_id"]
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_bot_api_preserves_completion_for_old_clients_and_allows_disable(
+    tmp_path, monkeypatch
+):
+    manager = BotConfigManager.__new__(BotConfigManager)
+    manager.config_file = tmp_path / "bots_config.json"
+    manager.save_bots([{"name": "bot"}])
+    api = BotApi(SimpleNamespace(bot_config_manager=manager, sync_bot_maps=Mock()))
+    for decision_conf, expected in (
+        ({"session_completion_provider_id": "completion"}, "completion"),
+        ({"provider_ids": ["reply-decision"]}, "completion"),
+        ({"session_completion_provider_id": ""}, ""),
+    ):
+        monkeypatch.setattr(
+            bot_api_module,
+            "request",
+            SimpleNamespace(
+                json=AsyncMock(
+                    return_value={"name": "bot", "decision_conf": decision_conf}
+                )
+            ),
+        )
+        assert (await api.save_bot()).status_code == 200
+        assert (
+            manager.load_bots()[0]["decision_conf"]["session_completion_provider_id"]
+            == expected
+        )
 
 
 @pytest.mark.parametrize("legacy_enabled", [True, False, None])

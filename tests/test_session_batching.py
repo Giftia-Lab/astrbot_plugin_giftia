@@ -1,6 +1,7 @@
 """Behavioral tests for batch boundaries, timers, and failure outcomes."""
 
 import asyncio
+import json
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -606,6 +607,357 @@ async def test_real_timer_runs_without_new_messages_and_ignores_legacy_settings(
     await runtime.drain()
     assert runtime.outcomes[("group", "A")] == "handled"
     runtime.manager.decision_engine.evaluate_decision.assert_awaited_once()
+
+
+@pytest.fixture
+def completion_runtime(scheduled_runtime):
+    runtime = scheduled_runtime
+    runtime.plugin.bot_map["bot"]["decision_conf"]["session_completion_provider_id"] = (
+        "completion"
+    )
+    runtime.plugin.call_llm = SimpleNamespace(
+        call_llm_session_completion=AsyncMock(return_value=False)
+    )
+    return runtime
+
+
+@pytest.mark.asyncio
+async def test_completion_uses_bot_context_without_mutating_pending_input(
+    completion_runtime,
+):
+    runtime = completion_runtime
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def check(**kwargs):
+        started.set()
+        await release.wait()
+        return True
+
+    checker = runtime.plugin.call_llm.call_llm_session_completion
+    checker.side_effect = check
+    runtime.histories["group"].extend(
+        MessageData(message_id=f"old-{index}", content="older") for index in range(15)
+    )
+    runtime.histories["group"].extend(
+        [
+            MessageData(message_id="bot", user_id="self", content="要选哪一种？"),
+            MessageData(message_id="log", role="operation_log", content="hidden log"),
+            MessageData(message_id="recalled", is_recalled=1, content="hidden recall"),
+        ]
+    )
+    await runtime.send("A", text="第二种 <谢谢>")
+    original = deepcopy(runtime.histories["group"])
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    assert runtime.clock.waits == [1]
+    await runtime.clock.advance(1)
+    await asyncio.wait_for(started.wait(), 1)
+    state = next(iter(runtime.manager.sessions.values()))
+    assert [item.message.message_id for item in state.pending] == ["A"]
+    assert state.current == []
+    assert runtime.outcomes == {("group", "A"): "pending"}
+    runtime.plugin.db.update_message_decision.assert_not_awaited()
+    runtime.manager.decision_engine.evaluate_decision.assert_not_awaited()
+    context = json.loads(checker.await_args.kwargs["user_prompt"])
+    assert context["bot_user_id"] == "self"
+    assert context["quiet_seconds"] == 1
+    assert 0 < len(context["recent_messages"]) <= 12
+    assert "要选哪一种？" in context["recent_messages"][-1]
+    assert "hidden" not in checker.await_args.kwargs["user_prompt"]
+    assert "&lt;谢谢&gt;" in context["pending_messages"][0]["message"]
+    assert runtime.histories["group"] == original
+    release.set()
+    await runtime.drain()
+    assert runtime.clock.now == 101
+    assert runtime.outcomes[("group", "A")] == "handled"
+    runtime.manager.decision_engine.evaluate_decision.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict", [False, None, RuntimeError("unavailable"), asyncio.CancelledError()]
+)
+async def test_incomplete_or_failed_check_keeps_original_deadline_once(
+    completion_runtime, verdict
+):
+    runtime = completion_runtime
+    checker = runtime.plugin.call_llm.call_llm_session_completion
+    if isinstance(verdict, BaseException):
+        checker.side_effect = verdict
+    else:
+        checker.return_value = verdict
+    await runtime.send("A")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(1)
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    # Drain the provider completion callback before provoking a spurious wakeup.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    state = next(iter(runtime.manager.sessions.values()))
+    runtime.clock.waiting.clear()
+    state.wake.set()
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    checker.assert_awaited_once()
+    assert runtime.clock.waits[-1] == 14
+    runtime.manager.decision_engine.evaluate_decision.assert_not_awaited()
+    await runtime.clock.advance(14)
+    await runtime.drain()
+    assert runtime.clock.now == 115
+
+
+@pytest.mark.asyncio
+async def test_new_input_restarts_quiet_period_without_extending_batch_deadline(
+    completion_runtime,
+):
+    runtime = completion_runtime
+    checker = runtime.plugin.call_llm.call_llm_session_completion
+    await runtime.send("A")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(0.5)
+    await runtime.send("B", user="second")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    checker.assert_not_awaited()
+    assert runtime.clock.waits[-1] == 1
+    await runtime.clock.advance(1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    checker.assert_awaited_once()
+    context = json.loads(checker.await_args.kwargs["user_prompt"])
+    assert [
+        fromstring(item["message"]).get("message_id")
+        for item in context["pending_messages"]
+    ] == ["A", "B"]
+    assert runtime.clock.waits[-1] == 8.5
+    await runtime.clock.advance(8.5)
+    await runtime.drain()
+    assert runtime.clock.now == 110
+
+
+@pytest.mark.asyncio
+async def test_late_approval_for_old_input_cannot_release_new_messages(
+    completion_runtime,
+):
+    runtime = completion_runtime
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def check(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                return True
+        return False
+
+    checker = runtime.plugin.call_llm.call_llm_session_completion
+    checker.side_effect = check
+    await runtime.send("A")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(1)
+    await asyncio.wait_for(started.wait(), 1)
+    await runtime.send("B")
+    await asyncio.wait_for(cancelled.wait(), 1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    runtime.manager.decision_engine.evaluate_decision.assert_not_awaited()
+    assert checker.await_count == 1
+    await runtime.clock.advance(1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert checker.await_count == 2
+    runtime.manager.decision_engine.evaluate_decision.assert_not_awaited()
+    await runtime.clock.advance(8)
+    await runtime.drain()
+    assert runtime.clock.now == 110
+
+
+@pytest.mark.asyncio
+async def test_original_deadline_cancels_an_unfinished_check(completion_runtime):
+    runtime = completion_runtime
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def check(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    runtime.plugin.call_llm.call_llm_session_completion.side_effect = check
+    await runtime.send("A")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(1)
+    await asyncio.wait_for(started.wait(), 1)
+    await runtime.clock.advance(14)
+    await runtime.drain()
+    assert cancelled.is_set()
+    assert runtime.clock.now == 115
+    assert runtime.outcomes[("group", "A")] == "handled"
+
+
+@pytest.mark.asyncio
+async def test_new_snapshot_waits_for_old_request_cleanup_before_checking(
+    completion_runtime,
+):
+    runtime = completion_runtime
+    started, cancelling, release, checked = (asyncio.Event() for _ in range(4))
+    active = maximum = 0
+
+    async def check(**kwargs):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        try:
+            if not started.is_set():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelling.set()
+                    await release.wait()
+                    return True
+            checked.set()
+            return False
+        finally:
+            active -= 1
+
+    checker = runtime.plugin.call_llm.call_llm_session_completion
+    checker.side_effect = check
+    await runtime.send("A")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(1)
+    await asyncio.wait_for(started.wait(), 1)
+    await runtime.send("B")
+    await asyncio.wait_for(cancelling.wait(), 1)
+    await runtime.clock.advance(1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert checker.await_count == 1
+    release.set()
+    await asyncio.wait_for(checked.wait(), 1)
+    assert maximum == 1
+    runtime.manager.decision_engine.evaluate_decision.assert_not_awaited()
+    await runtime.clock.advance(8)
+    await runtime.drain()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("characters,wait", [(70, 3), (120, 1.5), (170, 0.8)])
+async def test_short_wait_skips_completion_model(completion_runtime, characters, wait):
+    runtime = completion_runtime
+    await runtime.send("A", text="字" * characters)
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    assert runtime.clock.waits == [pytest.approx(wait)]
+    await runtime.clock.advance(wait)
+    await runtime.drain()
+    runtime.plugin.call_llm.call_llm_session_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_nearly_expired_batch_does_not_start_completion_check(completion_runtime):
+    runtime = completion_runtime
+    await runtime.send("A")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(14)
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    assert runtime.clock.waits[-1] == 1
+    await runtime.clock.advance(1)
+    await runtime.drain()
+    runtime.plugin.call_llm.call_llm_session_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_early_completion_still_observes_minimum_batch_interval(
+    completion_runtime,
+):
+    runtime = completion_runtime
+    runtime.plugin.call_llm.call_llm_session_completion.return_value = True
+    await runtime.send("A")
+    state = next(iter(runtime.manager.sessions.values()))
+    state.last_started = runtime.clock.now
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    runtime.manager.decision_engine.evaluate_decision.assert_not_awaited()
+    assert runtime.clock.waits[-1] == 1
+    await runtime.clock.advance(1)
+    await runtime.drain()
+    assert state.last_started == 102
+
+
+@pytest.mark.asyncio
+async def test_cancelling_worker_also_cleans_up_completion_request(completion_runtime):
+    runtime = completion_runtime
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def check(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    runtime.plugin.call_llm.call_llm_session_completion.side_effect = check
+    await runtime.send("A")
+    await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+    await runtime.clock.advance(1)
+    await asyncio.wait_for(started.wait(), 1)
+    state = next(iter(runtime.manager.sessions.values()))
+    state.task.cancel()
+    await asyncio.gather(state.task, return_exceptions=True)
+    assert cancelled.is_set()
+    assert runtime.clock.deadlines == {}
+    assert runtime.outcomes[("group", "A")] == "interrupted"
+    runtime.plugin.db.update_message_decision.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_input_arriving_behind_shared_lock_invalidates_early_release(
+    completion_runtime, monkeypatch
+):
+    runtime = completion_runtime
+    attempted = asyncio.Event()
+    lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def acquire(origin):
+        attempted.set()
+        async with lock:
+            yield
+
+    monkeypatch.setattr(
+        chat_module, "session_lock_manager", SimpleNamespace(acquire_lock=acquire)
+    )
+    checker = runtime.plugin.call_llm.call_llm_session_completion
+    checker.side_effect = [True, False]
+    await lock.acquire()
+    try:
+        await runtime.send("A")
+        await asyncio.wait_for(runtime.clock.waiting.wait(), 1)
+        await runtime.clock.advance(1)
+        await asyncio.wait_for(attempted.wait(), 1)
+        await runtime.send("B")
+    finally:
+        lock.release()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    runtime.manager.decision_engine.evaluate_decision.assert_not_awaited()
+    assert set(runtime.outcomes.values()) == {"pending"}
+    await runtime.clock.advance(1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert checker.await_count == 2
+    await runtime.clock.advance(8)
+    await runtime.drain()
+    call = runtime.manager.decision_engine.evaluate_decision.await_args
+    assert [message.message_id for message in call.kwargs["pending_messages"]] == [
+        "A",
+        "B",
+    ]
 
 
 @pytest.mark.asyncio

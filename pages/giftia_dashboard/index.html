@@ -11,14 +11,14 @@
     <link rel="stylesheet" href="css/base.css">
     <link rel="stylesheet" href="css/components.css">
     <link rel="stylesheet" href="css/components/tables.css">
-    <link rel="stylesheet" href="css/components/cards.css?v=relation-history">
+    <link rel="stylesheet" href="css/components/cards.css?v=status-card-width">
     <link rel="stylesheet" href="css/components/token_stats.css">
     <link rel="stylesheet" href="css/components/switches.css">
     <link rel="stylesheet" href="css/components/priority_select.css">
     <link rel="stylesheet" href="css/components/stickers.css">
     <link rel="stylesheet" href="css/components/reports.css">
     <link rel="stylesheet" href="css/components/model_health.css">
-    <link rel="stylesheet" href="css/dashboard.css?v=group-filters">
+    <link rel="stylesheet" href="css/dashboard.css?v=status-card-width">
     <link rel="stylesheet" href="css/modals.css">
     <!-- AstrBot Bridge SDK -->
     <script src="/api/plugin/page/bridge-sdk.js"></script>
@@ -1744,6 +1744,10 @@
                 <!-- Sub-tab 3: Decision Conf -->
                 <div id="subtab-decision" class="bot-subtab-content" style="display: none;">
                     <div class="form-group">
+                        <label for="bot-form-session-completion-provider">会话防抖决策模型（可选） <span class="info-tooltip" data-tooltip="选择决策模型后，在短暂静默时判断用户是否已表达完整，完成则提前结束合并等待。留空关闭；判断失败或未完成时沿用原等待时间。"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
+                        <select id="bot-form-session-completion-provider"></select>
+                    </div>
+                    <div class="form-group">
                         <label>小模型提供商优先级 <span class="info-tooltip" data-tooltip="按标签顺序依次尝试；当前提供商失败则自动降级"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
                         <div id="bot-form-dec-providers" class="tag-select-container"></div>
                     </div>
@@ -1771,7 +1775,7 @@
                         <div id="bot-form-invalid-reply-fallback-providers" class="tag-select-container"></div>
                     </div>
                     <div class="form-group">
-                        <label for="bot-form-review-provider">复审模型（可选） <span class="info-tooltip" data-tooltip="未选择时关闭。回复生成期间有新消息入库时，发送前复审一次；不通过则重新决策和生成，新回复直接发送。实际执行过原生工具或已进入后续工具轮次时跳过复审。"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
+                        <label for="bot-form-review-provider">复审模型（可选） <span class="info-tooltip" data-tooltip="可选择聊天模型或决策模型，未选择时关闭。回复生成期间有新消息入库时，发送前复审一次；不通过则重新决策和生成，新回复直接发送。实际执行过原生工具或已进入后续工具轮次时跳过复审。"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
                         <select id="bot-form-review-provider"></select>
                     </div>
                 </div>
