@@ -12,7 +12,7 @@
     <link rel="stylesheet" href="css/components.css">
     <link rel="stylesheet" href="css/components/tables.css">
     <link rel="stylesheet" href="css/components/cards.css?v=status-card-width">
-    <link rel="stylesheet" href="css/components/token_stats.css">
+    <link rel="stylesheet" href="css/components/token_stats.css?v=model-call-counts">
     <link rel="stylesheet" href="css/components/switches.css">
     <link rel="stylesheet" href="css/components/priority_select.css">
     <link rel="stylesheet" href="css/components/stickers.css">
@@ -523,7 +523,8 @@
                             <button class="btn-tab" data-tab="type">按类型</button>
                         </div>
                         <div class="token-chart-legend-info help-cursor" id="token-chart-legend-stats" title="悬停展示输入与输出各自消耗" style="font-size: 0.85rem; color: var(--font-secondary); cursor: help;">
-                            ALL: <span id="stat-total-tokens" class="bold" style="color: var(--font-primary); font-weight: 600;">0</span> Tokens | TTS: <span id="stat-tts-chars" class="bold" style="color: var(--font-primary); font-weight: 600;">0</span> Character
+                            Token: <span id="stat-total-tokens" class="bold" style="color: var(--font-primary); font-weight: 600;">0</span> | TTS: <span id="stat-tts-chars" class="bold" style="color: var(--font-primary); font-weight: 600;">0</span> 字符
+                            <span id="stat-token-missing" class="token-stat-calls" hidden></span>
                         </div>
                     </div>
                     <div class="token-chart-canvas-container">

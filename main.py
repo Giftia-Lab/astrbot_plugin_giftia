@@ -198,8 +198,10 @@ class Giftia(Star):
     async def initialize(self):
         """插件初始化方法"""
         # 实例化底座服务
-        self.ltm = LTM(self.context, self.embedding_conf, self.rerank_conf)
         self.db = await Database.connect()
+        self.ltm = LTM(
+            self.context, self.embedding_conf, self.rerank_conf, self.db.log_token_usage
+        )
         await self.provider_health.load_settings(self.db)
         self.sync_bot_maps()
         self.data_cache = DataCache(

@@ -255,7 +255,8 @@ TABLE_DEFINITIONS = (
         total_tokens INTEGER DEFAULT 0,
         extra_info TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        call_count INTEGER DEFAULT 1
+        call_count INTEGER DEFAULT 1,
+        usage_missing_calls INTEGER DEFAULT 0
     )
     """,
     """
@@ -272,6 +273,7 @@ TABLE_DEFINITIONS = (
         total_tokens INTEGER DEFAULT 0,
         status TEXT,
         call_count INTEGER DEFAULT 0,
+        usage_missing_calls INTEGER DEFAULT 0,
         UNIQUE(date, bot_name, group_or_user_id, type, provider_id, model_name, status)
     )
     """,

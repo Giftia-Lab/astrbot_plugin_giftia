@@ -1,265 +1,13 @@
 import asyncio
-import logging
-import sys
-import types
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-logging.basicConfig(level=logging.DEBUG)
-
-# 1. Mock aiocqhttp
-if "aiocqhttp" not in sys.modules:
-    aiocqhttp_module = types.ModuleType("aiocqhttp")
-    class CQHttp: pass
-    aiocqhttp_module.CQHttp = CQHttp
-    sys.modules["aiocqhttp"] = aiocqhttp_module
-
-if "xxhash" not in sys.modules:
-    import types
-    xxhash_module = types.ModuleType("xxhash")
-    xxhash_module.xxh3_64_hexdigest = lambda *args, **kwargs: "dummy_hash"
-    sys.modules["xxhash"] = xxhash_module
-
-if "PIL" not in sys.modules:
-    pil_module = types.ModuleType("PIL")
-    class Image: pass
-    pil_module.Image = Image
-    sys.modules["PIL"] = pil_module
-
-if "aiohttp" not in sys.modules:
-    aiohttp_module = types.ModuleType("aiohttp")
-    class ClientSession: pass
-    class ClientTimeout: pass
-    class TCPConnector: pass
-    class ClientError(Exception): pass
-    class ClientConnectorCertificateError(Exception): pass
-    class ClientConnectorSSLError(Exception): pass
-    aiohttp_module.ClientSession = ClientSession
-    aiohttp_module.ClientTimeout = ClientTimeout
-    aiohttp_module.TCPConnector = TCPConnector
-    aiohttp_module.ClientError = ClientError
-    aiohttp_module.ClientConnectorCertificateError = ClientConnectorCertificateError
-    aiohttp_module.ClientConnectorSSLError = ClientConnectorSSLError
-    sys.modules["aiohttp"] = aiohttp_module
-
-if "aiosqlite" not in sys.modules:
-    aiosqlite_module = types.ModuleType("aiosqlite")
-    class OperationalError(Exception): pass
-    class Connection: pass
-    class Row: pass
-    aiosqlite_module.OperationalError = OperationalError
-    aiosqlite_module.Connection = Connection
-    aiosqlite_module.Row = Row
-    sys.modules["aiosqlite"] = aiosqlite_module
-
-if "cachetools" not in sys.modules:
-    cachetools_module = types.ModuleType("cachetools")
-    class LRUCache(dict):
-        def __init__(self, maxsize=1000):
-            super().__init__()
-            self.maxsize = maxsize
-    cachetools_module.LRUCache = LRUCache
-    sys.modules["cachetools"] = cachetools_module
-
-if "bs4" not in sys.modules:
-    bs4_m = types.ModuleType("bs4")
-    class BeautifulSoup:
-        def __init__(self, *args, **kwargs):
-            pass
-    bs4_m.BeautifulSoup = BeautifulSoup
-    sys.modules["bs4"] = bs4_m
-
-    bs4_elem_m = types.ModuleType("bs4.element")
-    class NavigableString: pass
-    class Tag: pass
-    bs4_elem_m.NavigableString = NavigableString
-    bs4_elem_m.Tag = Tag
-    bs4_m.element = bs4_elem_m
-    sys.modules["bs4.element"] = bs4_elem_m
-
-if "mcp" not in sys.modules:
-    mcp_m = types.ModuleType("mcp")
-    sys.modules["mcp"] = mcp_m
-    mcp_types_m = types.ModuleType("mcp.types")
-    mcp_m.types = mcp_types_m
-    sys.modules["mcp.types"] = mcp_types_m
-
-# 2. Mock astrbot structure
-def _ensure_module(name):
-    if name not in sys.modules:
-        m = types.ModuleType(name)
-        sys.modules[name] = m
-    return sys.modules[name]
-
-astrbot_m = _ensure_module("astrbot")
-api_m = _ensure_module("astrbot.api")
-astrbot_m.api = api_m
-api_m.logger = logging.getLogger("astrbot")
-
-event_m = _ensure_module("astrbot.api.event")
-class AstrMessageEvent: pass
-class MessageChain:
-    def __init__(self, chain=None):
-        self.chain = chain or []
-class filter:
-    class PermissionType:
-        ADMIN = "ADMIN"
-    @staticmethod
-    def permission_type(*args, **kwargs):
-        def dec(f): return f
-        return dec
-    @staticmethod
-    def command(*args, **kwargs):
-        def dec(f): return f
-        return dec
-    @staticmethod
-    def event_message_type(*args, **kwargs):
-        def dec(f): return f
-        return dec
-
-event_m.AstrMessageEvent = AstrMessageEvent
-event_m.MessageChain = MessageChain
-event_m.filter = filter
-api_m.event = event_m
-
-star_api_m = _ensure_module("astrbot.api.star")
-api_m.star = star_api_m
-class Context: pass
-star_api_m.Context = Context
-class StarTools:
-    @staticmethod
-    def get_data_dir(*args, **kwargs):
-        return "/tmp"
-star_api_m.StarTools = StarTools
-
-comp_m = _ensure_module("astrbot.api.message_components")
-class At: pass
-class Node: pass
-class Nodes: pass
-class Plain:
-    def __init__(self, text=""):
-        self.text = text
-class Image: pass
-class Record: pass
-class File: pass
-class Reply: pass
-class Poke: pass
-class Video: pass
-comp_m.At = At
-comp_m.Node = Node
-comp_m.Nodes = Nodes
-comp_m.Plain = Plain
-comp_m.Image = Image
-comp_m.Record = Record
-comp_m.File = File
-comp_m.Reply = Reply
-comp_m.Poke = Poke
-comp_m.Video = Video
-api_m.message_components = comp_m
-
-core_m = _ensure_module("astrbot.core")
-astrbot_m.core = core_m
-class AstrBotConfig(dict): pass
-core_m.AstrBotConfig = AstrBotConfig
-
-msg_m = _ensure_module("astrbot.core.message")
-core_m.message = msg_m
-msg_comp_m = _ensure_module("astrbot.core.message.components")
-msg_m.components = msg_comp_m
-class BaseMessageComponent: pass
-msg_comp_m.BaseMessageComponent = BaseMessageComponent
-
-exc_m = _ensure_module("astrbot.core.exceptions")
-core_m.exceptions = exc_m
-class EmptyModelOutputError(Exception): pass
-exc_m.EmptyModelOutputError = EmptyModelOutputError
-
-star_m = _ensure_module("astrbot.core.star")
-core_m.star = star_m
-star_tools_m = _ensure_module("astrbot.core.star.star_tools")
-star_m.star_tools = star_tools_m
-class StarTools:
-    @staticmethod
-    def get_data_dir(*args, **kwargs):
-        return "/tmp"
-star_tools_m.StarTools = StarTools
-
-plat_m = _ensure_module("astrbot.core.platform")
-core_m.platform = plat_m
-ab_msg_m = _ensure_module("astrbot.core.platform.astrbot_message")
-plat_m.astrbot_message = ab_msg_m
-class AstrBotMessage: pass
-class MessageMember: pass
-ab_msg_m.AstrBotMessage = AstrBotMessage
-ab_msg_m.MessageMember = MessageMember
-
-ms_m = _ensure_module("astrbot.core.platform.message_session")
-plat_m.message_session = ms_m
-class MessageSession: pass
-ms_m.MessageSession = MessageSession
-
-mt_m = _ensure_module("astrbot.core.platform.message_type")
-plat_m.message_type = mt_m
-class MessageType:
-    GROUP_MESSAGE = "GROUP_MESSAGE"
-mt_m.MessageType = MessageType
-
-pm_m = _ensure_module("astrbot.core.platform.platform_metadata")
-plat_m.platform_metadata = pm_m
-class PlatformMetadata: pass
-pm_m.PlatformMetadata = PlatformMetadata
-
-src_m = _ensure_module("astrbot.core.platform.sources")
-plat_m.sources = src_m
-aiocq_src = _ensure_module("astrbot.core.platform.sources.aiocqhttp")
-src_m.aiocqhttp = aiocq_src
-aiocq_evt = _ensure_module("astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event")
-aiocq_src.aiocqhttp_message_event = aiocq_evt
-class AiocqhttpMessageEvent: pass
-aiocq_evt.AiocqhttpMessageEvent = AiocqhttpMessageEvent
-
-aiocq_adp = _ensure_module("astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter")
-aiocq_src.aiocqhttp_platform_adapter = aiocq_adp
-class AiocqhttpAdapter: pass
-aiocq_adp.AiocqhttpAdapter = AiocqhttpAdapter
-
-utils_m = _ensure_module("astrbot.core.utils")
-core_m.utils = utils_m
-media_u_m = _ensure_module("astrbot.core.utils.media_utils")
-media_u_m.detect_image_mime_type = lambda *args, **kwargs: "image/jpeg"
-utils_m.media_utils = media_u_m
-path_m = _ensure_module("astrbot.core.utils.astrbot_path")
-utils_m.astrbot_path = path_m
-path_m.get_astrbot_data_path = lambda *args, **kwargs: "/tmp"
-path_m.get_astrbot_plugin_data_path = lambda *args, **kwargs: "/tmp"
-
-agent_ctx_m = _ensure_module("astrbot.core.astr_agent_context")
-core_m.astr_agent_context = agent_ctx_m
-class AgentContextWrapper: pass
-class AstrAgentContext: pass
-agent_ctx_m.AgentContextWrapper = AgentContextWrapper
-agent_ctx_m.AstrAgentContext = AstrAgentContext
-
-tool_exec_m = _ensure_module("astrbot.core.astr_agent_tool_exec")
-core_m.astr_agent_tool_exec = tool_exec_m
-class FunctionToolExecutor: pass
-tool_exec_m.FunctionToolExecutor = FunctionToolExecutor
-
-lock_m = _ensure_module("astrbot.core.utils.session_lock")
-utils_m.session_lock = lock_m
-class DummySessionLockManager:
-    def acquire_lock(self, *args, **kwargs):
-        from contextlib import asynccontextmanager
-        @asynccontextmanager
-        async def _lock():
-            yield
-        return _lock()
-lock_m.session_lock_manager = DummySessionLockManager()
-
-# 3. Now import project modules
 from core.conversation.chat_manager import ChatManager
 from core.handlers.commands import CommandHandler
-from core.utils.schemas import Status
+from core.utils.schemas import MessageData, Status
+
+from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Plain, Reply
 
 
 class MockFilter:
@@ -286,31 +34,53 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.bot_map = {"Giftia": {"nickname": "小吉", "name": "Giftia"}}
         self.plugin.active_reply_counters = {}
         self.plugin.replying_status = {}
-        self.plugin.parse_locks = {"Giftia:adapter_1:GroupMessage:10001": asyncio.Lock()}
+        self.plugin.conf = {}
+        self.plugin.parse_locks = {
+            "Giftia:adapter_1:GroupMessage:10001": asyncio.Lock()
+        }
         self.plugin.data_cache.add_message = AsyncMock()
         self.plugin.data_cache.get_bot_status = AsyncMock()
         self.plugin.data_cache.update_bot_custom_status = AsyncMock()
+        self.plugin.data_cache.observe_group_metadata = AsyncMock()
+        self.plugin.data_cache.initialize_user_profile = AsyncMock()
+        self.plugin.data_cache.is_bot_muted.return_value = False
         self.plugin.db.get_kv_data = AsyncMock(return_value=None)
         self.plugin.db.upsert_kv_data = AsyncMock()
         self.plugin.message_parser.parse_user_message = AsyncMock(
-            return_value=(MagicMock(), [], [])
+            return_value=(
+                MessageData(message_id="incoming", user_id="12345678"),
+                [],
+                [],
+            )
+        )
+        self.plugin.message_parser.notice_parser.parse_notice = AsyncMock(
+            return_value=None
         )
         self.plugin.message_parser.chain_to_result = AsyncMock(
-            return_value=MagicMock(content="bot reply", media_id_list=[], forward_messages=[])
+            return_value=MagicMock(
+                content="bot reply", media_id_list=[], forward_messages=[]
+            )
         )
 
         self.plugin.passive_memory_enabled = False
         self.plugin.data_cache.get_stronghold = AsyncMock(return_value=None)
 
         self.chat_manager = ChatManager(self.plugin)
-        self.chat_manager.decision_engine.check_whitelists = MagicMock(return_value=True)
+        self.chat_manager.decision_engine.check_whitelists = MagicMock(
+            return_value=True
+        )
 
     async def asyncTearDown(self):
-        await asyncio.gather(*self.plugin.running_tasks.values(), return_exceptions=True)
+        await asyncio.gather(
+            *self.plugin.running_tasks.values(), return_exceptions=True
+        )
 
-    def _create_mock_event(self, activated_handlers: list | None = None, message_str: str = ""):
+    def _create_mock_event(
+        self, activated_handlers: list | None = None, message_str: str = ""
+    ):
         event = MagicMock()
         event._giftia_bypass_logging = False
+        event._notice_result = None
         event.get_self_id = MagicMock(return_value="3970706156")
         event.get_sender_id = MagicMock(return_value="12345678")
         event.get_group_id = MagicMock(return_value="10001")
@@ -386,11 +156,15 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         await event.send(msg)
         self.plugin.data_cache.add_message.assert_called_once()
 
-    async def test_delete_message_command_always_blocked_even_when_switch_disabled(self):
+    async def test_delete_message_command_always_blocked_even_when_switch_disabled(
+        self,
+    ):
         """无论 block_command_messages 是否开启，/删除消息 指令及其响应均强制屏蔽入库"""
         self.plugin.block_command_messages = False
 
-        del_handler = MockHandler("delete_message", [MockFilter("CommandFilter", "删除消息")])
+        del_handler = MockHandler(
+            "delete_message", [MockFilter("CommandFilter", "删除消息")]
+        )
         event = self._create_mock_event(
             activated_handlers=[del_handler, MockHandler("on_message", [])],
             message_str="/删除消息",
@@ -433,9 +207,13 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         event = self._create_mock_event()
 
         # 1. 正常设置状态
-        chunks = [c async for c in cmd_handler.set_persistent_status(event, "服装", "女仆装")]
+        chunks = [
+            c async for c in cmd_handler.set_persistent_status(event, "服装", "女仆装")
+        ]
         self.plugin.data_cache.update_bot_custom_status.assert_called_with(
-            bot_name="Giftia", group_id="10001", custom_status_updates={"服装": "女仆装"}
+            bot_name="Giftia",
+            group_id="10001",
+            custom_status_updates={"服装": "女仆装"},
         )
         self.assertEqual(len(chunks), 1)
 
@@ -446,13 +224,17 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         )
 
         # 3. 状态值为 "删除" 关键字
-        chunks = [c async for c in cmd_handler.set_persistent_status(event, "服装", "删除")]
+        chunks = [
+            c async for c in cmd_handler.set_persistent_status(event, "服装", "删除")
+        ]
         self.plugin.data_cache.update_bot_custom_status.assert_called_with(
             bot_name="Giftia", group_id="10001", custom_status_updates={"服装": ""}
         )
 
         # 4. 状态名为空
-        chunks = [c async for c in cmd_handler.set_persistent_status(event, "", "女仆装")]
+        chunks = [
+            c async for c in cmd_handler.set_persistent_status(event, "", "女仆装")
+        ]
         self.assertIn("状态名不能为空", chunks[0].chain[0].text)
 
     async def test_get_bot_status_command(self):
@@ -474,8 +256,8 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 1)
         output_text = chunks[0].chain[0].text
 
-        self.assertIn("【Bot 状态看板】", output_text)
-        self.assertIn("小吉 (Giftia)", output_text)
+        self.assertIn("临时状态：", output_text)
+        self.assertIn("常驻状态：", output_text)
         self.assertIn("心情：开心", output_text)
         self.assertIn("状态：空闲", output_text)
         self.assertIn("动作：品茶", output_text)
@@ -568,10 +350,9 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         # 2. 有 Reply 组件，删除成功返回成功提示
         self.plugin.data_cache.delete_message = AsyncMock(return_value=True)
         event_with_reply = self._create_mock_event()
-        reply = Reply()
-        reply.id = "msg_88888"
-        reply.sender_id = "user_123"
-        reply.message_str = "这是一条指令回复"
+        reply = Reply(
+            id="msg_88888", sender_id="user_123", message_str="这是一条指令回复"
+        )
         event_with_reply.get_messages.return_value = [reply]
 
         chunks2 = [c async for c in cmd_handler.delete_message(event_with_reply)]
@@ -595,7 +376,9 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.block_command_messages = False
 
         event = self._create_mock_event(
-            activated_handlers=[MockHandler("help_cmd", [MockFilter("CommandFilter", "help")])],
+            activated_handlers=[
+                MockHandler("help_cmd", [MockFilter("CommandFilter", "help")])
+            ],
             message_str="/help",
         )
         mock_bot = MagicMock()
@@ -620,7 +403,9 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.data_cache.add_message.assert_called_once()
         saved_msg_data = self.plugin.data_cache.add_message.call_args[0][2]
         self.assertEqual(saved_msg_data.message_id, "1710535200")
-        self.assertTrue(self.plugin.data_cache.add_message.call_args.kwargs["observed_by_bot"])
+        self.assertTrue(
+            self.plugin.data_cache.add_message.call_args.kwargs["observed_by_bot"]
+        )
 
     async def test_intercepted_send_concurrency_isolation(self):
         """测试同一个 bot 实例在多个并发事件中发送时，通过 ContextVar 隔离捕获正确的 message_id"""
@@ -641,21 +426,33 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
         shared_bot.send_private_msg = AsyncMock()
 
         event1 = self._create_mock_event(
-            activated_handlers=[MockHandler("cmd1", [MockFilter("CommandFilter", "cmd1")])],
+            activated_handlers=[
+                MockHandler("cmd1", [MockFilter("CommandFilter", "cmd1")])
+            ],
             message_str="/cmd1",
         )
         event1.bot = shared_bot
+
         async def send1(chain):
-            return await shared_bot.call_action("send_group_msg", group_id=10001, msg="msg1")
+            return await shared_bot.call_action(
+                "send_group_msg", group_id=10001, msg="msg1"
+            )
+
         event1.send = send1
 
         event2 = self._create_mock_event(
-            activated_handlers=[MockHandler("cmd2", [MockFilter("CommandFilter", "cmd2")])],
+            activated_handlers=[
+                MockHandler("cmd2", [MockFilter("CommandFilter", "cmd2")])
+            ],
             message_str="/cmd2",
         )
         event2.bot = shared_bot
+
         async def send2(chain):
-            return await shared_bot.call_action("send_group_msg", group_id=10001, msg="msg2")
+            return await shared_bot.call_action(
+                "send_group_msg", group_id=10001, msg="msg2"
+            )
+
         event2.send = send2
 
         await self.chat_manager.handle_message(event1)
@@ -663,14 +460,18 @@ class CommandBlockingAndStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.plugin.message_parser.chain_to_result = AsyncMock(
             side_effect=lambda *args, **kwargs: MagicMock(
-                content=args[0][0].text if args and args[0] and hasattr(args[0][0], "text") else "bot reply",
+                content=args[0][0].text
+                if args and args[0] and hasattr(args[0][0], "text")
+                else "bot reply",
                 media_id_list=[],
                 forward_messages=[],
             )
         )
 
         saved_msgs = []
-        self.plugin.data_cache.add_message = AsyncMock(side_effect=lambda b, g, msg, **kwargs: saved_msgs.append(msg))
+        self.plugin.data_cache.add_message = AsyncMock(
+            side_effect=lambda b, g, msg, **kwargs: saved_msgs.append(msg)
+        )
 
         # 并发执行两个 event.send
         await asyncio.gather(

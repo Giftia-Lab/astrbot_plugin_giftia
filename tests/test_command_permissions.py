@@ -80,14 +80,13 @@ def pipeline(monkeypatch):
     async def downstream_handler(_plugin, event):
         await downstream(event)
 
-    monkeypatch.setattr(
-        waking.SessionPluginManager,
-        "filter_handlers_by_session",
-        AsyncMock(side_effect=lambda _event, handlers: handlers),
-    )
     stage = waking.WakingCheckStage()
+    config = {"admins_id": ["admin"], "wake_prefix": ["/"]}
     stage.ctx = SimpleNamespace(
-        astrbot_config={"admins_id": ["admin"], "wake_prefix": ["/"]}
+        astrbot_config=config,
+        plugin_manager=SimpleNamespace(
+            context=SimpleNamespace(get_config=Mock(return_value=config))
+        ),
     )
     stage.ignore_bot_self_message = False
     stage.friend_message_needs_wake_prefix = False

@@ -95,6 +95,8 @@ async def search_memories_with_rerank(
         )
         if memories and plugin.rerank_conf.get("enabled", False):
             memories = await plugin.ltm.rerank_memories(
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
                 query=query,
                 memories=memories,
                 top_k=conf_int(plugin.rerank_conf, "top_k", search_limit),
@@ -187,6 +189,8 @@ async def search_automatic_user_memories(
         try:
             # Score the whole union before reserving slots or applying top-k.
             memories = await plugin.ltm.rerank_memories(
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
                 query=query,
                 memories=memories,
                 top_k=len(memories),

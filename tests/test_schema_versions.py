@@ -26,6 +26,38 @@ async def schema_version(conn):
 
 
 @pytest.mark.asyncio
+async def test_model_usage_upgrade_preserves_existing_statistics(database):
+    await database.execute("BEGIN")
+    for version, migration in migrations.MIGRATIONS:
+        if version >= 7:
+            break
+        await migration(database)
+        await database.execute(f"PRAGMA user_version={version}")
+    await database.execute(
+        "INSERT INTO token_usage (type, total_tokens, call_count) VALUES ('reply', 42, 2)"
+    )
+    await database.execute(
+        "INSERT INTO token_daily_stats (date, type, total_tokens, call_count) "
+        "VALUES ('2026-11-01', 'reply', 100, 5)"
+    )
+    await database.commit()
+    await schema.initialize_database(database)
+    for table, tokens, calls in (("token_usage", 42, 2), ("token_daily_stats", 100, 5)):
+        async with database.execute(
+            f"SELECT total_tokens, call_count, usage_missing_calls FROM {table}"
+        ) as cursor:
+            assert await cursor.fetchone() == (tokens, calls, 0)
+        await database.execute(f"UPDATE {table} SET usage_missing_calls=1")
+    await database.commit()
+    await schema.initialize_database(database)
+    for table in ("token_usage", "token_daily_stats"):
+        async with database.execute(
+            f"SELECT usage_missing_calls FROM {table}"
+        ) as cursor:
+            assert await cursor.fetchone() == (1,)
+
+
+@pytest.mark.asyncio
 async def test_group_metadata_upgrade_preserves_rules_and_names_on_restart(database):
     await database.execute("BEGIN")
     for version, migration in migrations.MIGRATIONS:

@@ -1,54 +1,15 @@
-"""GIF 转换与表情包路径解析的单元测试。
+"""Exercise GIF conversion and safe sticker paths against real SDK components."""
 
-发送侧的这两块逻辑要么涉及安全（路径穿越），要么直接决定表情包能不能发出去
-（转换失败必须静默回退而不是抛异常中断回复），所以单独覆盖。
-
-与 test_schema_migration.py 一致：先把 astrbot 相关模块 stub 进 sys.modules
-再导入被测模块，这样不需要真的装 AstrBot。
-"""
-
-import logging
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
+from core.utils.emoji_manager import GIF_CACHE_SUBDIR, resolve_sticker_path
+from core.utils.gif_convert import GifConverter
 from PIL import Image as PILImage
 
-
-def _stub_module(name: str, **attrs) -> types.ModuleType:
-    module = types.ModuleType(name)
-    # 置 __path__ 让它能作为包被 from x.y import z 继续深入
-    module.__path__ = []
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    sys.modules[name] = module
-    return module
-
-
-class FakeImage:
-    """Image 组件替身：被测代码只用到 .file 与 fromFileSystem。"""
-
-    def __init__(self, file: str = ""):
-        self.file = file
-
-    @classmethod
-    def fromFileSystem(cls, path):
-        return cls(file=str(path))
-
-
-if "astrbot.api" not in sys.modules:
-    _stub_module("astrbot")
-    _stub_module("astrbot.api", logger=logging.getLogger("astrbot"))
-    _stub_module("astrbot.api.star", StarTools=object)
-    _stub_module("astrbot.api.message_components", Image=FakeImage)
-    _stub_module("astrbot.core")
-    _stub_module("astrbot.core.message")
-    _stub_module("astrbot.core.message.components", BaseMessageComponent=object)
-
-from core.utils.emoji_manager import GIF_CACHE_SUBDIR, resolve_sticker_path  # noqa: E402
-from core.utils.gif_convert import GifConverter  # noqa: E402
+from astrbot.api.message_components import Image
 
 
 class ResolveStickerPathTests(unittest.TestCase):
@@ -122,13 +83,14 @@ class GifConverterTests(unittest.IsolatedAsyncioTestCase):
         self.outside = self.stickers.parent / "outside.png"
         PILImage.new("RGB", (10, 10)).save(self.outside)
 
-        emoji_manager = types.SimpleNamespace(stickers_dir=self.stickers)
+        emoji_manager = SimpleNamespace(stickers_dir=self.stickers)
         self.conv = GifConverter(emoji_manager)
 
     def _make_animated_webp(self, name: str, frame_count: int) -> Path:
         path = self.stickers / name
         frames = [
-            PILImage.new("RGB", (32, 32), (i * 5 % 256, 0, 0)) for i in range(frame_count)
+            PILImage.new("RGB", (32, 32), (i * 5 % 256, 0, 0))
+            for i in range(frame_count)
         ]
         frames[0].save(
             path,
@@ -143,10 +105,10 @@ class GifConverterTests(unittest.IsolatedAsyncioTestCase):
     # ── 判定 ─────────────────────────────────────────────────────────────
 
     def test_accepts_sticker_originals(self):
-        self.assertEqual(self.conv.resolve_sticker_file(FakeImage(str(self.png))), self.png)
+        self.assertEqual(self.conv.resolve_sticker_file(Image(str(self.png))), self.png)
         # file:// 形式也要认（部分适配器会带协议前缀）
         self.assertEqual(
-            self.conv.resolve_sticker_file(FakeImage(self.png.as_uri())), self.png
+            self.conv.resolve_sticker_file(Image(self.png.as_uri())), self.png
         )
 
     def test_skips_files_that_must_not_be_converted(self):
@@ -161,7 +123,7 @@ class GifConverterTests(unittest.IsolatedAsyncioTestCase):
         }
         for label, value in cases.items():
             with self.subTest(label):
-                self.assertIsNone(self.conv.resolve_sticker_file(FakeImage(value)))
+                self.assertIsNone(self.conv.resolve_sticker_file(Image(value)))
 
     # ── 转换与缓存 ────────────────────────────────────────────────────────
 
@@ -215,10 +177,10 @@ class GifConverterTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_send_chain_replaces_only_stickers(self):
         text_marker = object()
         original = [
-            FakeImage(str(self.png)),
+            Image(str(self.png)),
             text_marker,
-            FakeImage(str(self.outside)),
-            FakeImage(str(self.already_gif)),
+            Image(str(self.outside)),
+            Image(str(self.already_gif)),
         ]
         snapshot = [getattr(c, "file", c) for c in original]
 
@@ -235,7 +197,7 @@ class GifConverterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_build_send_chain_returns_input_when_nothing_to_convert(self):
         # 没有可转项时原样返回入参，避免无谓的列表拷贝
-        plain = [FakeImage(str(self.outside)), object()]
+        plain = [Image(str(self.outside)), object()]
         self.assertIs(await self.conv.build_send_chain(plain), plain)
 
         empty = []

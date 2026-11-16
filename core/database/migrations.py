@@ -541,6 +541,18 @@ async def _migrate_to_v6(conn: aiosqlite.Connection) -> None:
     )
 
 
+async def _migrate_to_v7(conn: aiosqlite.Connection) -> None:
+    """Preserve calls without reported token usage when archiving statistics.
+
+    Args:
+        conn: Database connection being initialized.
+    """
+    for table in ("token_usage", "token_daily_stats"):
+        await _add_missing_columns(
+            conn, table, (("usage_missing_calls", "INTEGER DEFAULT 0"),)
+        )
+
+
 # Schema versions are independent of plugin releases; released steps stay frozen.
 MIGRATIONS = (
     (1, _migrate_legacy_to_v1),
@@ -549,6 +561,7 @@ MIGRATIONS = (
     (4, _migrate_to_v4),
     (5, _migrate_to_v5),
     (6, _migrate_to_v6),
+    (7, _migrate_to_v7),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

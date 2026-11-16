@@ -50,6 +50,7 @@ class StubMessageEvent:
         self._extras = {}
         self._result = None
         self._force_stopped = False
+        self._execution_active = False
         self._has_send_oper = False
         self._temporary_local_files = []
 
@@ -99,6 +100,7 @@ def make_fake_event(**overrides):
         "plugins_name": None,
         "_result": None,
         "_force_stopped": False,
+        "_execution_active": False,
         "_has_send_oper": False,
         "_temporary_local_files": [],
         "unified_msg_origin": "aiocqhttp:bot1:GroupMessage:123",
@@ -128,6 +130,7 @@ class FakeEventTests(unittest.TestCase):
         self.assertEqual(get_adapter_id(event), "aiocqhttp:bot1")
         self.assertIsNone(event.plugins_name)
         self.assertEqual(event.role, "member")
+        self.assertIs(event._execution_active, False)
 
     def test_unknown_attr_degrades_instead_of_raising(self):
         """AstrBot 后续新增的未知实例属性降级为空壳 Mock，不再中断回复"""

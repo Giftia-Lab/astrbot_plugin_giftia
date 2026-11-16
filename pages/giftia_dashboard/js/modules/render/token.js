@@ -49,6 +49,14 @@ function getChartThemeColors() {
     return { fontColor, fontSecondary, gridColor };
 }
 
+function formatTokenUsage(tokens, calls, missingCalls, pct) {
+    if (!(tokens > 0) && missingCalls > 0 && missingCalls >= calls) {
+        return '<span>Token 未提供</span>';
+    }
+    return `<span>${Number(tokens || 0).toLocaleString()} Tokens (${pct}%)</span>`
+        + (missingCalls > 0 ? `<span class="token-stat-calls">另 ${Number(missingCalls).toLocaleString()} 次 Token 未提供</span>` : '');
+}
+
 export function updateChartTheme() {
     if (!tokenChartInstance) return;
     const { fontColor, fontSecondary, gridColor } = getChartThemeColors();
@@ -144,13 +152,19 @@ export function renderTokenStatsSummary(stats) {
     const summary = stats.summary || {};
 
     // Total numbers
-    document.getElementById("stat-total-tokens").textContent = Number(summary.total_tokens || 0).toLocaleString();
+    const allUsageMissing = !(summary.total_tokens > 0) && summary.usage_missing_calls > 0 && summary.usage_missing_calls >= summary.total_calls;
+    document.getElementById("stat-total-tokens").textContent = allUsageMissing ? '未提供' : Number(summary.total_tokens || 0).toLocaleString();
     document.getElementById("stat-tts-chars").textContent = Number(summary.total_chars_tts || 0).toLocaleString();
+    const missingNote = document.getElementById('stat-token-missing');
+    if (missingNote) {
+        missingNote.textContent = summary.usage_missing_calls > 0 ? `${Number(summary.usage_missing_calls).toLocaleString()} 次调用 Token 未提供` : '';
+        missingNote.hidden = !(summary.usage_missing_calls > 0);
+    }
 
     // Set title breakdowns on hover
     const totalCard = document.getElementById("token-chart-legend-stats");
     if (totalCard) {
-        totalCard.setAttribute("title", `输入 (Prompt): ${Number(summary.total_prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(summary.total_completion_tokens || 0).toLocaleString()}`);
+        totalCard.setAttribute("title", allUsageMissing ? 'Token 未提供' : `已提供的输入 (Prompt): ${Number(summary.total_prompt_tokens || 0).toLocaleString()}\n已提供的输出 (Completion): ${Number(summary.total_completion_tokens || 0).toLocaleString()}\n趋势和占比仅包含已提供的 Token 用量`);
     }
 
     renderChartAndProgressBars();
@@ -338,6 +352,8 @@ function renderChartAndProgressBars() {
             container.innerHTML = groups.map((g) => {
                 const tokens = g.total_tokens || 0;
                 const pct = ((tokens / maxGroupTokens) * 100).toFixed(1);
+                const missingCalls = g.usage_missing_calls || 0;
+                const usageUnavailable = !(tokens > 0) && missingCalls > 0 && missingCalls >= g.call_count;
                 const gKey = window.formatSessionLabel(g) || '私聊/系统';
                 const barColor = getColorForKey(g.group_or_user_id || '私聊/系统');
                 return `
@@ -345,13 +361,13 @@ function renderChartAndProgressBars() {
                         <div class="token-stat-info align-center">
                             <span class="token-stat-name monospace" title="${window.escapeHtml(gKey)}">${window.escapeHtml(gKey)}</span>
                             <span class="token-stat-value">
-                                <span>${tokens.toLocaleString()} Tokens (${pct}%)</span>
+                                ${formatTokenUsage(tokens, g.call_count || 0, missingCalls, pct)}
                                 <span class="token-stat-calls">调用 ${Number(g.call_count || 0).toLocaleString()} 次</span>
                             </span>
                         </div>
-                        <div class="progress-bar-container">
+                        ${usageUnavailable ? '' : `<div class="progress-bar-container">
                             <div class="progress-bar-fill" style="width: ${pct}%; background-color: ${barColor};"></div>
-                        </div>
+                        </div>`}
                     </div>
                 `;
             }).join('');
@@ -365,30 +381,38 @@ function renderChartAndProgressBars() {
             container.innerHTML = models.map((m) => {
                 const tokens = m.total_tokens || 0;
                 const pct = ((tokens / maxModelTokens) * 100).toFixed(1);
+                const missingCalls = m.usage_missing_calls || 0;
+                const usageUnavailable = !(tokens > 0) && missingCalls > 0 && missingCalls >= m.call_count;
                 let mainText = m.model_name || '未知';
                 let subText = m.provider_id || '';
-                if (subText && subText.includes('/')) {
+                if (!m.model_type && subText && subText.includes('/')) {
                     const parts = subText.split('/');
                     subText = parts.slice(1).join('/');
+                }
+                if (m.model_type) {
+                    const typeLabel = m.model_type === 'embedding' ? '嵌入' : '重排序';
+                    const modeLabel = m.execution_mode === 'local' ? '本地' : '远程';
+                    subText = `${typeLabel} · ${modeLabel}${subText ? ` · ${subText}` : ''}`;
                 }
                 const providerName = m.provider_id || mainText;
                 const mKey = m.provider_id ? `${m.provider_id}/${m.model_name}` : m.model_name;
                 const barColor = getColorForKey(mKey);
+                const hoverTitle = usageUnavailable ? 'Token 未提供' : `输入 (Prompt): ${Number(m.prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(m.completion_tokens || 0).toLocaleString()}`;
                 return `
-                    <div class="token-stat-row help-cursor" title="输入 (Prompt): ${Number(m.prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(m.completion_tokens || 0).toLocaleString()}">
+                    <div class="token-stat-row help-cursor" title="${window.escapeHtml(hoverTitle)}">
                         <div class="token-stat-info align-start">
                             <div class="token-stat-name-col">
-                                <span class="token-stat-name bold" title="${providerName}">${mainText}</span>
-                                ${subText ? `<span class="token-stat-subname" title="${subText}">${subText}</span>` : ''}
+                                <span class="token-stat-name bold" title="${window.escapeHtml(providerName)}">${window.escapeHtml(mainText)}</span>
+                                ${subText ? `<span class="token-stat-subname" title="${window.escapeHtml(subText)}">${window.escapeHtml(subText)}</span>` : ''}
                             </div>
                             <span class="token-stat-value">
-                                <span>${tokens.toLocaleString()} Tokens (${pct}%)</span>
+                                ${formatTokenUsage(tokens, m.call_count || 0, missingCalls, pct)}
                                 <span class="token-stat-calls">调用 ${Number(m.call_count || 0).toLocaleString()} 次</span>
                             </span>
                         </div>
-                        <div class="progress-bar-container">
+                        ${usageUnavailable ? '' : `<div class="progress-bar-container">
                             <div class="progress-bar-fill" style="width: ${pct}%; background-color: ${barColor};"></div>
-                        </div>
+                        </div>`}
                     </div>
                 `;
             }).join('');
@@ -402,7 +426,9 @@ function renderChartAndProgressBars() {
             { key: 'image_caption_tokens', name: '图片转述', class: 'image_caption' },
             { key: 'sticker_analysis_tokens', name: '表情包分析', class: 'sticker_analysis' },
             { key: 'audio_caption_tokens', name: '音频转述', class: 'audio_caption' },
-            { key: 'passive_summary_tokens', name: '被动总结', class: 'passive_summary' }
+            { key: 'passive_summary_tokens', name: '被动总结', class: 'passive_summary' },
+            { key: 'embedding_tokens', name: '嵌入', class: 'embedding' },
+            { key: 'rerank_tokens', name: '重排序', class: 'rerank' }
         ];
         const activeCategories = categories.filter(cat => (summary[cat.key] || 0) > 0 || (summary[`${cat.class}_calls`] || 0) > 0);
         const maxTypeTokens = activeCategories.reduce((sum, cat) => sum + (summary[cat.key] || 0), 0) || 1;
@@ -412,6 +438,13 @@ function renderChartAndProgressBars() {
             container.innerHTML = activeCategories.map(cat => {
                 const tokens = summary[cat.key] || 0;
                 const pct = ((tokens / maxTypeTokens) * 100).toFixed(1);
+                const calls = summary[`${cat.class}_calls`] || 0;
+                const missingCalls = summary[`${cat.class}_usage_missing_calls`] || 0;
+                const usageUnavailable = !(tokens > 0) && missingCalls > 0 && missingCalls >= calls;
+                const modes = ['local', 'remote'].map(mode => {
+                    const modeCalls = summary[`${cat.class}_${mode}_calls`] || 0;
+                    return modeCalls > 0 ? `${mode === 'local' ? '本地' : '远程'} ${Number(modeCalls).toLocaleString()} 次` : '';
+                }).filter(Boolean).join(' · ');
                 let hoverTitle = "";
                 if (cat.key === 'reply_tokens') {
                     hoverTitle = `输入 (Prompt): ${Number(summary.reply_prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(summary.reply_completion_tokens || 0).toLocaleString()}`;
@@ -422,19 +455,23 @@ function renderChartAndProgressBars() {
                 } else if (cat.key === 'session_completion_tokens') {
                     hoverTitle = `输入 (Prompt): ${Number(summary.session_completion_prompt_tokens || 0).toLocaleString()}\n输出 (Completion): ${Number(summary.session_completion_completion_tokens || 0).toLocaleString()}`;
                 }
+                if (usageUnavailable) hoverTitle = 'Token 未提供';
                 const barColor = getColorForKey(cat.class);
                 return `
                     <div class="token-stat-row ${hoverTitle ? 'help-cursor' : ''}" ${hoverTitle ? `title="${hoverTitle}"` : ''}>
                         <div class="token-stat-info align-center">
-                            <span class="token-stat-name">${cat.name}</span>
+                            <div class="token-stat-name-col">
+                                <span class="token-stat-name">${cat.name}</span>
+                                ${modes ? `<span class="token-stat-subname">${modes}</span>` : ''}
+                            </div>
                             <span class="token-stat-value no-mono">
-                                <span>${tokens.toLocaleString()} Tokens (${pct}%)</span>
-                                <span class="token-stat-calls">调用 ${Number(summary[`${cat.class}_calls`] || 0).toLocaleString()} 次</span>
+                                ${formatTokenUsage(tokens, calls, missingCalls, pct)}
+                                <span class="token-stat-calls">调用 ${Number(calls).toLocaleString()} 次</span>
                             </span>
                         </div>
-                        <div class="progress-bar-container">
+                        ${usageUnavailable ? '' : `<div class="progress-bar-container">
                             <div class="progress-bar-fill" style="width: ${pct}%; background-color: ${barColor};"></div>
-                        </div>
+                        </div>`}
                     </div>
                 `;
             }).join('');

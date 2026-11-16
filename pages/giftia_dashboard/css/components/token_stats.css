@@ -131,6 +131,15 @@
     font-family: inherit;
 }
 
+#stat-token-missing {
+    display: block;
+    margin-top: 4px;
+}
+
+#stat-token-missing[hidden] {
+    display: none;
+}
+
 /* Shared progress bar background and fill */
 .progress-bar-container {
     height: 8px;

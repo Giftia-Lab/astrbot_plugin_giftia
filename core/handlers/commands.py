@@ -137,6 +137,8 @@ class CommandHandler:
             rerank_memories = await self.plugin.ltm.rerank_memories(
                 rag_queries,
                 embedding_memories,
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
                 top_k=self.plugin.rerank_conf.get("top_k", 5),
                 threshold=self.plugin.rerank_conf.get("threshold", 0.45),
             )
