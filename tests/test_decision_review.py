@@ -2,7 +2,7 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -107,7 +107,7 @@ async def decision_runtime(request):
     )
     runtime.provider = provider
     runtime.context = context
-    runtime.caller = CallLLM(context, None, {}, {})
+    runtime.caller = CallLLM(context, None, {"decision_retry_times": 3}, {})
     runtime.caller._log_token_usage_safely = AsyncMock()
     runtime.health = runtime.caller.provider_health
     runtime.recorder = AsyncMock()
@@ -245,10 +245,15 @@ async def test_decision_review_works_with_health_management_off(decision_runtime
 async def test_decision_review_timeout_is_not_a_rejection(decision_runtime):
     runtime = decision_runtime
     runtime.context.decision.yes_no = AsyncMock(side_effect=TimeoutError())
-    assert (
-        await runtime.caller.call_llm_reply_review("review", "input", "bot", "group")
-        is None
-    )
+    with patch.object(runtime.health, "call", wraps=runtime.health.call) as call:
+        assert (
+            await runtime.caller.call_llm_reply_review(
+                "review", "input", "bot", "group"
+            )
+            is None
+        )
+    call.assert_awaited_once()
+    assert call.await_args.kwargs.get("request_timeout") is None
     runtime.context.decision.yes_no.assert_awaited_once()
     assert set(runtime.context.decision.yes_no.await_args.kwargs) == {
         "provider_id",
@@ -326,12 +331,15 @@ async def test_disabled_completion_provider_skips_request(
 async def test_completion_timeout_keeps_original_wait_without_retry(decision_runtime):
     runtime = decision_runtime
     runtime.context.decision.yes_no = AsyncMock(side_effect=TimeoutError())
-    assert (
-        await runtime.caller.call_llm_session_completion(
-            "review", "input", "bot", "group"
+    with patch.object(runtime.health, "call", wraps=runtime.health.call) as call:
+        assert (
+            await runtime.caller.call_llm_session_completion(
+                "review", "input", "bot", "group"
+            )
+            is None
         )
-        is None
-    )
+    call.assert_awaited_once()
+    assert call.await_args.kwargs.get("request_timeout") is None
     runtime.context.decision.yes_no.assert_awaited_once()
     assert runtime.context.decision.yes_no.await_args.kwargs["threshold"] == 0.8
 

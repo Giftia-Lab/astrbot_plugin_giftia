@@ -249,7 +249,6 @@ class CallLLM:
                 question=SESSION_COMPLETION_QUESTION,
                 state=user_prompt,
                 threshold=0.8,
-                request_timeout=2,
             )
             extra_info["status"] = "parse_failed"
             if not isinstance(response, bool):
@@ -330,7 +329,6 @@ class CallLLM:
                     decision=True,
                     question=review_instructions,
                     state=user_prompt,
-                    request_timeout=10,
                 )
                 extra_info["status"] = "parse_failed"
                 if not isinstance(response, bool):
