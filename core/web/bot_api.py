@@ -366,6 +366,22 @@ class BotApi:
                 },
             )
 
+        function_tools = []
+        if getattr(giftia, "call_llm", None) and (
+            giftia.tools_config.get("use_source_tools")
+            or giftia.tools_config.get("force_xml_tools")
+        ):
+            try:
+                function_tools = sorted(
+                    t.name
+                    for t in giftia.call_llm._get_reply_tools(None).tools
+                    if t.name != "delegate_task"
+                )
+            except Exception:
+                logger.warning(
+                    "[Giftia] Tool inventory unavailable for the bot editor",
+                    exc_info=True,
+                )
         logger.info(
             f"[Giftia BotApi] Metadata fetched: {len(llm_providers)} LLM providers, {len(decision_providers)} decision providers, {len(tts_providers)} TTS providers, {len(adapters)} adapters, {len(personas)} personas"
         )
@@ -375,6 +391,7 @@ class BotApi:
             "tts_providers": tts_providers,
             "adapters": adapters,
             "personas": personas,
+            "function_tools": function_tools,
             "interactive_features": INTERACTIVE_FEATURES_METADATA,
         }
 
@@ -459,6 +476,10 @@ class BotApi:
                         "decision_conf", {}
                     ).get("session_completion_provider_id", "")
                 reply_conf = body["llm_reply_conf"] = body.get("llm_reply_conf") or {}
+                reply_conf.setdefault(
+                    "subagent_tools",
+                    previous.get("llm_reply_conf", {}).get("subagent_tools", []),
+                )
                 if "review_provider_id" not in reply_conf:
                     reply_conf["review_provider_id"] = previous.get(
                         "llm_reply_conf", {}

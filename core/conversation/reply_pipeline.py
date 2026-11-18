@@ -226,6 +226,7 @@ class ReplyPipeline:
         review_after_id: int | None = None,
         cross_group_context: dict[str, list[MessageData]] | None = None,
         cross_group_names: dict[str, str] | None = None,
+        delegation_delivery: bool = False,
     ):
         """Generate frozen reply turns and review the first eligible unsent draft.
 
@@ -249,6 +250,7 @@ class ReplyPipeline:
             review_after_id: Input watermark; None disables review for this run.
             cross_group_context: Source-group windows frozen across tool turns.
             cross_group_names: Known names for the frozen source-group windows.
+            delegation_delivery: Resume a completed background task for its user.
 
         Yields:
             Parsed reply results ready for action dispatch.
@@ -598,6 +600,12 @@ class ReplyPipeline:
                 group_data.group_name,
                 refreshed=True,
             )
+        prompt_extra = list(other_data or [])
+        delegations = getattr(self.plugin, "delegations", None)
+        if delegations and delegations.active(bot_name, event.unified_msg_origin):
+            active_tasks = await delegations.context(bot_name, event.unified_msg_origin)
+            if active_tasks:
+                prompt_extra.append(active_tasks)
         user_prompt = build_reply_prompt(
             current_session_id=group_or_user_id,
             recent_messages=prompt_recent_messages,
@@ -617,7 +625,7 @@ class ReplyPipeline:
             active_user_briefs=active_user_briefs,
             memos=memos,
             memo_limit=memo_limit,
-            other_data=other_data,
+            other_data=prompt_extra,
             bot_sticker=bot_sticker_cache,
             message_truncate_limit=getattr(
                 self.plugin, "reply_message_truncate_limit", 1500
@@ -666,6 +674,20 @@ class ReplyPipeline:
         )
         if provider_selection_mode == "random":
             random.shuffle(provider_ids)
+        if llm_reply_conf.get("subagent_tools"):
+            tool_context["delegation_providers"] = provider_ids
+            tool_context["delegation_delivery"] = delegation_delivery
+            tool_context["delegation_inputs"] = [
+                {
+                    "message_id": msg.message_id,
+                    "user_id": msg.user_id,
+                    "nickname": msg.nickname,
+                    "content": msg.content,
+                    "media_ids": msg.media_id_list,
+                }
+                for msg in reply_messages
+                if msg.role == "message" and not msg.is_recalled
+            ]
 
         # 4. 调用 LLM 进行回复
         if getattr(self.plugin, "passive_memory_enabled", False):
@@ -851,7 +873,9 @@ class ReplyPipeline:
         tool_results.extend(llm_result.xml_tool_results)
 
         # 10. 判断是否需要继续循环迭代
-        if llm_result.tools_to_call or llm_result.xml_tool_results:
+        if (llm_result.tools_to_call and not llm_result.xml_tool_results) or any(
+            "delegated" not in receipt for receipt in llm_result.xml_tool_results
+        ):
             logger.debug(f"{bot_name} llm step {times + 1} ...")
             async for chunk in self.dispatch_llm_reply_loop(
                 event=event,
@@ -872,5 +896,6 @@ class ReplyPipeline:
                 tool_context=tool_context,
                 cross_group_context=cross_group_context,
                 cross_group_names=cross_group_names,
+                delegation_delivery=delegation_delivery,
             ):
                 yield chunk

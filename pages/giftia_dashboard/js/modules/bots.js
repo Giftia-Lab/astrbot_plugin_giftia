@@ -18,6 +18,7 @@ let currentEditingBotName = null;
 
 // Tag Select Components Instances
 let adaptersTagSelect = null;
+let subagentToolSelect = null;
 let decProvidersTagSelect = null;
 let replyProvidersTagSelect = null;
 let invalidReplyFallbackTagSelect = null;
@@ -215,6 +216,21 @@ function openBotEditModal(botName = null) {
     document.getElementById('bot-form-name').value = bot.name || '';
     document.getElementById('bot-form-nickname').value = bot.nickname || '';
     renderPersonaSelectOptions(bot.llm_reply_conf?.persona_id || 'default');
+    const personaField = document.getElementById('bot-form-reply-persona');
+    const renderSubagentTools = (selection, keepSaved = false) => {
+        const persona = stateBotMetadata.personas?.find(p => p.name === personaField.value);
+        const names = (stateBotMetadata.function_tools || []).filter(name =>
+            persona && (persona.tools == null || persona.tools.includes(name)));
+        subagentToolSelect?.destroy();
+        subagentToolSelect = new TagSelectComponent('bot-form-subagent-tools', {
+            placeholder: names.length ? '选择要委派的工具…' : '当前人格没有可分配的工具',
+            availableOptions: names.map(id => ({id, name: id})),
+            selectedValues: keepSaved ? selection : selection.filter(name => names.includes(name)),
+            allowCustom: false
+        });
+    };
+    renderSubagentTools(bot.llm_reply_conf?.subagent_tools || [], true);
+    personaField.onchange = () => renderSubagentTools(subagentToolSelect.getValues());
 
     // Destroy existing TagSelect instances before re-creating
     if (adaptersTagSelect && typeof adaptersTagSelect.destroy === 'function') adaptersTagSelect.destroy();
@@ -770,6 +786,7 @@ async function saveBotFromModal() {
             invalid_reply_fallback_provider_ids: invalidReplyFallbackProviders,
             provider_selection_mode: document.getElementById('bot-form-reply-mode').value,
             persona_id: document.getElementById('bot-form-reply-persona')?.value || 'default',
+            subagent_tools: subagentToolSelect.getValues(),
             review_provider_id: document.getElementById('bot-form-review-provider').value,
         },
         tts_config: {

@@ -255,6 +255,12 @@ class WebUIManager:
             desc="Get chat history list",
         )
         ctx.register_web_api(
+            route="/astrbot_plugin_giftia/chat_history/delegation",
+            view_handler=self.web_api.get_delegated_task,
+            methods=["GET"],
+            desc="Read a delegated task transcript by chat history receipt",
+        )
+        ctx.register_web_api(
             route="/astrbot_plugin_giftia/chat_history/filter_options",
             view_handler=self.web_api.get_chat_history_filter_options,
             methods=["GET"],

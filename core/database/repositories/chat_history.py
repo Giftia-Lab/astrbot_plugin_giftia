@@ -642,6 +642,15 @@ class ChatHistoryRepository(BaseRepository):
     @serialized_operation
     async def delete_chat_history(self, bot_name: str, group_or_user_id: str):
         await self.conn.execute(
+            "DELETE FROM delegated_steps WHERE task_id IN "
+            "(SELECT id FROM delegated_tasks WHERE bot_name=? AND session_id=?)",
+            (bot_name, group_or_user_id),
+        )
+        await self.conn.execute(
+            "DELETE FROM delegated_tasks WHERE bot_name=? AND session_id=?",
+            (bot_name, group_or_user_id),
+        )
+        await self.conn.execute(
             """
             DELETE FROM forwarded_message WHERE group_or_user_id = ? AND bot_name = ?
             """,

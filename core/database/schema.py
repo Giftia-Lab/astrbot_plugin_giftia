@@ -9,6 +9,7 @@ import aiosqlite
 from . import migrations
 
 TABLE_DEFINITIONS = (
+    *migrations.DELEGATION_V9,
     """
     CREATE TABLE IF NOT EXISTS group_metadata (
         bot_name TEXT NOT NULL,
@@ -410,7 +411,11 @@ async def initialize_database(conn: aiosqlite.Connection) -> None:
             # Recover interrupted batches on every startup, independent of migrations.
             await cursor.execute(
                 "UPDATE chat_history SET processing_status='interrupted' "
-                "WHERE processing_status IN ('pending', 'processing')"
+                "WHERE processing_status IN ('pending', 'processing', 'waiting_agent')"
+            )
+            await cursor.execute(
+                "UPDATE delegated_tasks SET status='interrupted' "
+                "WHERE status IN ('running', 'ready', 'delivering')"
             )
             if is_new:
                 await cursor.execute(

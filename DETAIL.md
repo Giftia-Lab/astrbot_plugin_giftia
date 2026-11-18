@@ -51,6 +51,7 @@
 - **机器人昵称 (`nickname`)**: 机器人昵称，用于聊天历史和消息记录中的识别。
 - **适配器ID列表 (`adapter_ids`)**: 绑定的平台/账号 ID（通过 `/sid` 查看），支持多平台共用同一记忆。
 - **关联 AstrBot 人格 (`llm_reply_conf.persona_id`)**: 在 WebUI 的 **身份与适配器** 页签中绑定 AstrBot 控制台的人格配置，回复时自动抽取该人格的 System Prompt 以及工具能力限制 (`tools`)。
+- **子 Agent 可用工具 (`llm_reply_conf.subagent_tools`)** 在同一页签配置，默认留空。选中的人格工具由后台子任务独占。主人格可以在一份 XML 里委派任务并向用户回复进度，完成后由原会话接收报告。[委派和追问说明](docs/zh/subagent-tools.md)
 
 ### 2. 小模型接话决策 (`decision_conf`)
 群聊默认使用前置决策是否接话，仍遵循接话触发条件与所选的 `@` 策略；被允许的私聊默认直接回复，跳过小模型决策。

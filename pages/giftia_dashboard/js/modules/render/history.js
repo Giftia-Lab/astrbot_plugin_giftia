@@ -67,7 +67,7 @@ export function renderChatHistory(items) {
         const processingLabels = {
             pending: '待处理', processing: '处理中', handled: '处理完成',
             skipped: '已跳过', failed: '处理失败', partial_failed: '部分执行后失败',
-            interrupted: '处理中断',
+            interrupted: '处理中断', waiting_agent: '等待子 Agent',
         };
         const processingLabel = processingLabels[item.processing_status];
         if (processingLabel) {
@@ -86,6 +86,9 @@ export function renderChatHistory(items) {
         const summaryLabel = memoryLabels[item.memory_status] || memoryLabels.unseen;
         const summaryClass = item.memory_status === 'summarized' ? 'badge-success' : 'badge-secondary';
         const summaryBadge = `<span class="badge ${summaryClass}" style="font-size: 0.75rem; padding: 2px 6px;">${summaryLabel}</span>`;
+        const task = item.role === 'operation_log' && /^delegate_(\d+)_/.exec(item.message_id);
+        const transcript = task ? `<details class="delegated-trace" data-receipt="${Number(item.id)}">
+            <summary>查看子任务 #${task[1]} 的执行记录</summary><pre></pre></details>` : '';
 
         return `
             <tr>
@@ -99,6 +102,7 @@ export function renderChatHistory(items) {
                 <td data-label="发送人">${senderDisp}</td>
                 <td data-label="消息内容">
                     <div style="max-width: 480px; word-break: break-all;">${window.renderMessageWithMediaTags ? window.renderMessageWithMediaTags(item.content) : window.escapeHtml(item.content)}</div>
+                    ${transcript}
                 </td>
                 <td data-label="判定结果">${decisionBadge}</td>
                 <td data-label="RAG状态">${ragBadge}</td>
@@ -112,4 +116,21 @@ export function renderChatHistory(items) {
             </tr>
         `;
     }).join("");
+    for (const detail of container.querySelectorAll('.delegated-trace')) {
+        detail.addEventListener('toggle', async () => {
+            if (!detail.open) return;
+            const pre = detail.querySelector('pre');
+            pre.textContent = '正在读取执行记录…';
+            const labels = {input: '委派要求', call: '工具调用', output: '工具结果', report: '执行报告'};
+            try {
+                const res = await window.apiGet('/chat_history/delegation', {receipt: detail.dataset.receipt});
+                if (res.status !== 'success') throw new Error(res.message || '读取失败');
+                pre.textContent = res.data.steps.map(step =>
+                    `第 ${step.revision} 版 · ${labels[step.kind] || step.kind}\n${JSON.stringify(step.data, null, 2)}`
+                ).join('\n\n');
+            } catch (error) {
+                pre.textContent = error.message;
+            }
+        });
+    }
 }
