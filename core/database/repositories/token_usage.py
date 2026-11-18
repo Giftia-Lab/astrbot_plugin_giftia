@@ -30,9 +30,10 @@ class TokenUsageRepository(BaseRepository):
                 """
                 INSERT INTO token_usage (
                     bot_name, group_or_user_id, type, provider_id, model_name,
-                    prompt_tokens, completion_tokens, total_tokens, extra_info
+                    prompt_tokens, completion_tokens, total_tokens, extra_info,
+                    usage_missing_calls
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     bot_name or "",
@@ -44,6 +45,10 @@ class TokenUsageRepository(BaseRepository):
                     completion_tokens or 0,
                     total_tokens or 0,
                     extra_info_str,
+                    int(
+                        bool(extra_info and extra_info.get("usage_missing"))
+                        and not (prompt_tokens or completion_tokens or total_tokens)
+                    ),
                 ),
             )
             await self.conn.commit()
@@ -163,7 +168,8 @@ class TokenUsageRepository(BaseRepository):
                        SUM(prompt_tokens) as prompt,
                        SUM(completion_tokens) as completion,
                        SUM(total_tokens) as total,
-                       SUM(COALESCE(call_count, 1)) as calls
+                       SUM(COALESCE(call_count, 1)) as calls,
+                       SUM(COALESCE(usage_missing_calls, 0)) as missing_calls
                 FROM token_usage
                 {where_usage}
                 GROUP BY group_or_user_id, provider_id, model_name, type
@@ -175,14 +181,21 @@ class TokenUsageRepository(BaseRepository):
                        SUM(prompt_tokens) as prompt,
                        SUM(completion_tokens) as completion,
                        SUM(total_tokens) as total,
-                       SUM(COALESCE(call_count, 0)) as calls
+                       SUM(COALESCE(call_count, 0)) as calls,
+                       SUM(COALESCE(usage_missing_calls, 0)) as missing_calls
                 FROM token_daily_stats
                 {where_daily}
                 GROUP BY group_or_user_id, provider_id, model_name, type
             """
 
             merged = defaultdict(
-                lambda: {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+                lambda: {
+                    "prompt": 0,
+                    "completion": 0,
+                    "total": 0,
+                    "calls": 0,
+                    "missing_calls": 0,
+                }
             )
 
             async with self.conn.execute(sql_usage, params_usage) as cursor:
@@ -198,6 +211,7 @@ class TokenUsageRepository(BaseRepository):
                     merged[key]["completion"] += r["completion"] or 0
                     merged[key]["total"] += r["total"] or 0
                     merged[key]["calls"] += r["calls"] or 0
+                    merged[key]["missing_calls"] += r["missing_calls"] or 0
 
             async with self.conn.execute(sql_daily, params_daily) as cursor:
                 rows = await cursor.fetchall()
@@ -212,9 +226,11 @@ class TokenUsageRepository(BaseRepository):
                     merged[key]["completion"] += r["completion"] or 0
                     merged[key]["total"] += r["total"] or 0
                     merged[key]["calls"] += r["calls"] or 0
+                    merged[key]["missing_calls"] += r["missing_calls"] or 0
 
             summary = {
                 "total_calls": 0,
+                "usage_missing_calls": 0,
                 "total_tokens": 0,
                 "total_prompt_tokens": 0,
                 "total_completion_tokens": 0,
@@ -236,9 +252,13 @@ class TokenUsageRepository(BaseRepository):
                 "tts_chars": 0,
                 "passive_summary_tokens": 0,
                 "sticker_analysis_tokens": 0,
+                "embedding_tokens": 0,
+                "rerank_tokens": 0,
             }
 
-            group_map = defaultdict(lambda: {"tokens": 0, "tts_chars": 0, "calls": 0})
+            group_map = defaultdict(
+                lambda: {"tokens": 0, "tts_chars": 0, "calls": 0, "missing_calls": 0}
+            )
             model_map = defaultdict(
                 lambda: {
                     "prompt": 0,
@@ -246,6 +266,7 @@ class TokenUsageRepository(BaseRepository):
                     "total": 0,
                     "tts_chars": 0,
                     "calls": 0,
+                    "missing_calls": 0,
                 }
             )
 
@@ -255,36 +276,50 @@ class TokenUsageRepository(BaseRepository):
                 completion = val["completion"]
                 total = val["total"]
                 calls = val["calls"]
+                missing_calls = val["missing_calls"]
                 calls_key = f"{type_name}_calls"
                 summary[calls_key] = summary.get(calls_key, 0) + calls
+                missing_key = f"{type_name}_usage_missing_calls"
+                summary[missing_key] = summary.get(missing_key, 0) + missing_calls
+
+                model_type = type_name if type_name in ("embedding", "rerank") else ""
+                # Local models have no provider ID; external calls always record one.
+                execution_mode = (
+                    ("remote" if provider_id else "local") if model_type else None
+                )
+                if model_type:
+                    mode_key = f"{type_name}_{execution_mode}_calls"
+                    summary[mode_key] = summary.get(mode_key, 0) + calls
 
                 norm_provider_id = provider_id
                 norm_model_name = model_name
-                if provider_id and "/" in provider_id:
+                if not model_type and provider_id and "/" in provider_id:
                     parts = provider_id.split("/")
                     norm_provider_id = parts[0]
                     norm_model_name = "/".join(parts[1:])
+                model_key = (norm_provider_id, norm_model_name, model_type)
 
                 if type_name != "tts":
                     summary["total_calls"] += calls
+                    summary["usage_missing_calls"] += missing_calls
                     summary["total_tokens"] += total
                     summary["total_prompt_tokens"] += prompt
                     summary["total_completion_tokens"] += completion
 
                     group_map[group_id]["tokens"] += total
                     group_map[group_id]["calls"] += calls
-                    model_map[(norm_provider_id, norm_model_name)]["prompt"] += prompt
-                    model_map[(norm_provider_id, norm_model_name)]["completion"] += (
-                        completion
-                    )
-                    model_map[(norm_provider_id, norm_model_name)]["total"] += total
-                    model_map[(norm_provider_id, norm_model_name)]["calls"] += calls
+                    group_map[group_id]["missing_calls"] += missing_calls
+                    model_map[model_key]["prompt"] += prompt
+                    model_map[model_key]["completion"] += completion
+                    model_map[model_key]["total"] += total
+                    model_map[model_key]["calls"] += calls
+                    model_map[model_key]["missing_calls"] += missing_calls
                 else:
                     summary["total_chars_tts"] += total
                     summary["tts_chars"] += total
 
                     group_map[group_id]["tts_chars"] += total
-                    model_map[(norm_provider_id, norm_model_name)]["tts_chars"] += total
+                    model_map[model_key]["tts_chars"] += total
 
                 if type_name == "decision":
                     summary["decision_tokens"] += total
@@ -310,6 +345,8 @@ class TokenUsageRepository(BaseRepository):
                     summary["passive_summary_tokens"] += total
                 elif type_name == "sticker_analysis":
                     summary["sticker_analysis_tokens"] += total
+                elif model_type:
+                    summary[f"{type_name}_tokens"] += total
 
             by_group = []
             for gid, gval in group_map.items():
@@ -319,12 +356,13 @@ class TokenUsageRepository(BaseRepository):
                         "total_tokens": gval["tokens"],
                         "total_chars_tts": gval["tts_chars"],
                         "call_count": gval["calls"],
+                        "usage_missing_calls": gval["missing_calls"],
                     }
                 )
             by_group.sort(key=lambda x: x["total_tokens"], reverse=True)
 
             by_model = []
-            for (provider_id, model_name), mval in model_map.items():
+            for (provider_id, model_name, model_type), mval in model_map.items():
                 if mval["total"] > 0 or mval["calls"] > 0:
                     by_model.append(
                         {
@@ -335,6 +373,11 @@ class TokenUsageRepository(BaseRepository):
                             "total_tokens": mval["total"],
                             "total_chars_tts": mval["tts_chars"],
                             "call_count": mval["calls"],
+                            "usage_missing_calls": mval["missing_calls"],
+                            "model_type": model_type or None,
+                            "execution_mode": ("remote" if provider_id else "local")
+                            if model_type
+                            else None,
                         }
                     )
             by_model.sort(key=lambda x: x["total_tokens"], reverse=True)
@@ -491,7 +534,7 @@ class TokenUsageRepository(BaseRepository):
                 )
                 t_key = p["type"]
                 g_key = p["group_or_user_id"] or "私聊/系统"
-                if t_key != "tts":
+                if t_key != "tts" and p["total"] > 0:
                     model_totals[m_key] += p["total"]
                     type_totals[t_key] += p["total"]
                     group_totals[g_key] += p["total"]
@@ -551,7 +594,7 @@ class TokenUsageRepository(BaseRepository):
                 g_key = p["group_or_user_id"] or "私聊/系统"
                 tokens = p["total"]
 
-                if t_key != "tts":
+                if t_key != "tts" and tokens > 0:
                     if m_key in top_models:
                         timeline_data[bucket_key]["model"][m_key] += tokens
                     else:
@@ -648,7 +691,7 @@ class TokenUsageRepository(BaseRepository):
             offset = (page - 1) * page_size
             sql_select = f"""
                 SELECT id, bot_name, group_or_user_id, type, provider_id, model_name,
-                       prompt_tokens, completion_tokens, total_tokens, created_at
+                       prompt_tokens, completion_tokens, total_tokens, created_at, usage_missing_calls
                 FROM token_usage
                 {where_clause}
                 ORDER BY id DESC
@@ -671,6 +714,12 @@ class TokenUsageRepository(BaseRepository):
                             "prompt_tokens": r["prompt_tokens"],
                             "completion_tokens": r["completion_tokens"],
                             "total_tokens": r["total_tokens"],
+                            "usage_missing_calls": r["usage_missing_calls"],
+                            "execution_mode": (
+                                "remote" if r["provider_id"] else "local"
+                            )
+                            if r["type"] in ("embedding", "rerank")
+                            else None,
                             "created_at": created_at_str,
                         }
                     )
@@ -695,7 +744,8 @@ class TokenUsageRepository(BaseRepository):
             # 2. 查询所有早于临界点的详细记录
             sql_select = """
                 SELECT bot_name, group_or_user_id, type, provider_id, model_name,
-                       prompt_tokens, completion_tokens, total_tokens, extra_info, created_at, call_count
+                       prompt_tokens, completion_tokens, total_tokens, extra_info, created_at,
+                       call_count, usage_missing_calls
                 FROM token_usage
                 WHERE created_at < ?
             """
@@ -717,6 +767,7 @@ class TokenUsageRepository(BaseRepository):
                             "extra_info": r["extra_info"],
                             "created_at": r["created_at"],
                             "call_count": dict(r).get("call_count", 1) or 1,
+                            "usage_missing_calls": r["usage_missing_calls"] or 0,
                         }
                     )
 
@@ -725,7 +776,13 @@ class TokenUsageRepository(BaseRepository):
 
             # 3. 按维度分类累加
             daily_sums = defaultdict(
-                lambda: {"prompt": 0, "completion": 0, "total": 0, "count": 0}
+                lambda: {
+                    "prompt": 0,
+                    "completion": 0,
+                    "total": 0,
+                    "count": 0,
+                    "missing_calls": 0,
+                }
             )
             for r in rows_to_squash:
                 # 提取日期 YYYY-MM-DD (按本地时间提取)
@@ -761,6 +818,7 @@ class TokenUsageRepository(BaseRepository):
                 daily_sums[key]["completion"] += r["completion_tokens"]
                 daily_sums[key]["total"] += r["total_tokens"]
                 daily_sums[key]["count"] += r["call_count"]
+                daily_sums[key]["missing_calls"] += r["usage_missing_calls"]
 
             # 4. 批量 Upsert 合并到历史表
             upsert_count = 0
@@ -778,15 +836,16 @@ class TokenUsageRepository(BaseRepository):
                     """
                     INSERT INTO token_daily_stats (
                         date, bot_name, group_or_user_id, type, provider_id, model_name, status,
-                        prompt_tokens, completion_tokens, total_tokens, call_count
+                        prompt_tokens, completion_tokens, total_tokens, call_count, usage_missing_calls
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(date, bot_name, group_or_user_id, type, provider_id, model_name, status)
                     DO UPDATE SET
                         prompt_tokens = prompt_tokens + excluded.prompt_tokens,
                         completion_tokens = completion_tokens + excluded.completion_tokens,
                         total_tokens = total_tokens + excluded.total_tokens,
-                        call_count = call_count + excluded.call_count
+                        call_count = call_count + excluded.call_count,
+                        usage_missing_calls = usage_missing_calls + excluded.usage_missing_calls
                     """,
                     (
                         date_val,
@@ -800,6 +859,7 @@ class TokenUsageRepository(BaseRepository):
                         sums["completion"],
                         sums["total"],
                         sums["count"],
+                        sums["missing_calls"],
                     ),
                 )
                 upsert_count += 1

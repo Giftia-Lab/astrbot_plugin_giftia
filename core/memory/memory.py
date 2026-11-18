@@ -2,6 +2,8 @@ import asyncio
 import gc
 import threading
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from astrbot.api import logger
 from astrbot.api.star import Context, StarTools
@@ -24,12 +26,19 @@ def get_memory_schema(dim: int):
 
 
 class LTM:
-    def __init__(self, context: Context, embedding_conf: dict, rerank_conf: dict):
+    def __init__(
+        self,
+        context: Context,
+        embedding_conf: dict,
+        rerank_conf: dict,
+        usage_logger: Callable[..., Awaitable[None]] | None = None,
+    ):
         import lancedb
 
         self.context = context
         self.embedding_conf = embedding_conf
         self.rerank_conf = rerank_conf
+        self.usage_logger = usage_logger
         self.db_path = StarTools.get_data_dir("astrbot_plugin_giftia") / "lancedb"
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.table_name = "ltm"
@@ -72,12 +81,74 @@ class LTM:
 
         provider_config = getattr(provider, "provider_config", None)
         if isinstance(provider_config, dict):
-            for key in ("rerank_model", "nvidia_rerank_model", "model"):
+            for key in (
+                "embedding_model",
+                "rerank_model",
+                "nvidia_rerank_model",
+                "model",
+            ):
                 model_name = provider_config.get(key)
                 if model_name:
                     return model_name
 
         return "unknown"
+
+    @asynccontextmanager
+    async def _track_model_call(
+        self, type_name: str, bot_name: str, group_or_user_id: str | None
+    ) -> AsyncIterator[None]:
+        """Record one model invocation without changing its result or failure.
+
+        Args:
+            type_name: Embedding or rerank operation being invoked.
+            bot_name: Bot initiating the call.
+            group_or_user_id: Conversation initiating the call.
+
+        Yields:
+            Control while the model invocation runs.
+        """
+        usage_logger = getattr(self, "usage_logger", None)
+        if usage_logger is None:
+            yield
+            return
+        config = self.embedding_conf if type_name == "embedding" else self.rerank_conf
+        remote = config.get("use_external_provider", False)
+        attribute = (
+            ("embed_provider" if remote else "embed_model")
+            if type_name == "embedding"
+            else ("rerank_provider" if remote else "reranker")
+        )
+        model = getattr(self, attribute, None)
+        if model is None:
+            yield
+            return
+        provider_id = (self._get_provider_id(model) or "unknown") if remote else ""
+        model_name = self._get_provider_model(model)
+        status = "success"
+        try:
+            yield
+        except BaseException:
+            status = "api_failed"
+            raise
+        finally:
+            try:
+                await usage_logger(
+                    bot_name=bot_name,
+                    group_or_user_id=group_or_user_id or "",
+                    type=type_name,
+                    provider_id=provider_id,
+                    model_name=model_name,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    extra_info={
+                        "usage_missing": True,
+                        "execution_mode": "remote" if remote else "local",
+                        "status": status,
+                    },
+                )
+            except Exception as error:
+                logger.warning("[Giftia LTM] Failed to record model call: %s", error)
 
     def _get_all_rerank_providers(self) -> list:
         get_all_rerank_providers = getattr(
@@ -296,7 +367,10 @@ class LTM:
                 logger.error("Embedding provider not initialized")
                 return None
             try:
-                vector = await self.embed_provider.get_embedding(text)
+                async with self._track_model_call(
+                    "embedding", bot_name, group_or_user_id
+                ):
+                    vector = await self.embed_provider.get_embedding(text)
             except Exception as e:
                 logger.error(f"[Giftia LTM] 获取外部 Embedding 失败: {e}")
                 return None
@@ -322,16 +396,17 @@ class LTM:
             return memory_id, vector_bytes
         else:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                None,
-                self._add_memory_sync,
-                bot_name,
-                group_or_user_id,
-                text,
-                time,
-                metadata,
-                memory_id,
-            )
+            async with self._track_model_call("embedding", bot_name, group_or_user_id):
+                return await loop.run_in_executor(
+                    None,
+                    self._add_memory_sync,
+                    bot_name,
+                    group_or_user_id,
+                    text,
+                    time,
+                    metadata,
+                    memory_id,
+                )
 
     def _add_memory_sync(
         self,
@@ -400,6 +475,7 @@ class LTM:
         exclude_ids: list[str] | None = None,
         raise_errors: bool = False,
         include_ids: list[str] | None = None,
+        usage_group_or_user_id: str | None = None,
     ) -> list[dict]:
         """Search scoped vectors with optional strict failure handling.
 
@@ -412,6 +488,7 @@ class LTM:
             exclude_ids: Records excluded before applying the candidate limit.
             raise_errors: Propagate search failures to the caller.
             include_ids: Allow only these records before limiting; None allows all.
+            usage_group_or_user_id: Initiating conversation when searching across sessions.
 
         Returns:
             Matching vector records in relevance order.
@@ -422,6 +499,11 @@ class LTM:
         if include_ids is not None and not include_ids:
             return []
         self._lazy_init()
+        usage_session = (
+            group_or_user_id
+            if usage_group_or_user_id is None
+            else usage_group_or_user_id
+        )
         if self.embedding_conf.get("use_external_provider", False):
             if not hasattr(self, "embed_provider"):
                 logger.error("Embedding provider not initialized")
@@ -429,7 +511,8 @@ class LTM:
                     raise RuntimeError("Embedding provider not initialized")
                 return []
             try:
-                query_vector = await self.embed_provider.get_embedding(query)
+                async with self._track_model_call("embedding", bot_name, usage_session):
+                    query_vector = await self.embed_provider.get_embedding(query)
             except Exception as e:
                 logger.error(f"[Giftia LTM] 外部 Embedding 搜索向量获取失败: {e}")
                 if raise_errors:
@@ -468,18 +551,19 @@ class LTM:
                 return []
         else:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                None,
-                self._search_memory_sync,
-                bot_name,
-                group_or_user_id,
-                query,
-                limit,
-                threshold,
-                exclude_ids,
-                raise_errors,
-                include_ids,
-            )
+            async with self._track_model_call("embedding", bot_name, usage_session):
+                return await loop.run_in_executor(
+                    None,
+                    self._search_memory_sync,
+                    bot_name,
+                    group_or_user_id,
+                    query,
+                    limit,
+                    threshold,
+                    exclude_ids,
+                    raise_errors,
+                    include_ids,
+                )
 
     def _search_memory_sync(
         self,
@@ -617,6 +701,8 @@ class LTM:
         top_k: int = 5,
         threshold: float = 0.5,
         raise_errors: bool = False,
+        bot_name: str = "",
+        group_or_user_id: str = "",
     ) -> list[dict]:
         """Rerank candidates with optional strict failure handling.
 
@@ -626,6 +712,8 @@ class LTM:
             top_k: Maximum number of retained candidates.
             threshold: Minimum accepted relevance score.
             raise_errors: Propagate provider failures to the caller.
+            bot_name: Bot initiating the rerank call.
+            group_or_user_id: Conversation initiating the rerank call.
 
         Returns:
             Retained records in relevance order.
@@ -633,6 +721,8 @@ class LTM:
         Raises:
             Exception: A provider failure when raise_errors is true.
         """
+        if not memories:
+            return []
         self._lazy_init()
         try:
             memory_texts = [memory["text"] for memory in memories]
@@ -644,9 +734,10 @@ class LTM:
                         raise RuntimeError("Rerank provider not initialized")
                     return []
 
-                rerank_results = await self.rerank_provider.rerank(
-                    query, memory_texts, top_n=top_k
-                )
+                async with self._track_model_call("rerank", bot_name, group_or_user_id):
+                    rerank_results = await self.rerank_provider.rerank(
+                        query, memory_texts, top_n=top_k
+                    )
 
                 reranked_memories = []
                 for result in rerank_results:
@@ -673,8 +764,9 @@ class LTM:
                 return []
 
             # 使用 Cross-Encoder 计算相关性分数
-            scores_gen = self.reranker.rerank(query, memory_texts)
-            scores = list(scores_gen)
+            async with self._track_model_call("rerank", bot_name, group_or_user_id):
+                scores_gen = self.reranker.rerank(query, memory_texts)
+                scores = list(scores_gen)
 
             # 将分数与记忆合并，并按分数从高到低排序
             reranked_memories = []

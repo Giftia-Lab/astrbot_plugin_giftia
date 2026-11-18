@@ -24,9 +24,9 @@ from core.llm.prompt import (
 from core.llm.xml_parse import XmlParse
 from core.utils.schemas import (
     Decision,
+    Memo,
     MessageData,
     SessionRecallMemory,
-    ShortTask,
     Status,
 )
 
@@ -278,17 +278,7 @@ def test_user_context_keeps_session_data_without_fixed_usage_instructions(decisi
         "user_id": "member",
         "group_data": "",
         "group_profile": "会话自定义规则\n保留这段数据",
-        "short_tasks": [
-            ShortTask(
-                task_id="task",
-                bot_name="bot",
-                group_or_user_id="current",
-                creator_user_id="member",
-                creator_nickname="成员",
-                content="会话任务数据",
-                status="active",
-            )
-        ],
+        "memos": [Memo("memo-id", "会话备忘数据", "2026-11-18 12:00:00", 4800)],
         "slang_entries": [{"term": "会话专属词", "description": "本会话词汇解释"}],
     }
     if decision:
@@ -311,12 +301,13 @@ def test_user_context_keeps_session_data_without_fixed_usage_instructions(decisi
         )
     root = fromstring("<context>" + prompt + "</context>")
     assert root.find("group_rules").text.strip() == data["group_profile"]
-    assert root.find("task_board/task").text == "会话任务数据"
-    assert root.find("task_board/rule") is None
+    assert root.find("memos/memo").text == "会话备忘数据"
+    assert root.find("memos/memo").get("remaining") == "1 h"
+    assert root.find("memos/rule") is None
     assert root.find("slang/term").text == "本会话词汇解释"
     assert root.find("memory_usage_rules") is None
     for rule in (
-        "任务默认保持进行中",
+        "记录你想在期限内留意的计划",
         "以下词条仅供理解对话",
         "非本会话互动记录若可能涉及隐私",
         "这些记忆若可能涉及隐私",
@@ -548,7 +539,7 @@ def test_function_tools_are_removed_from_bot_features_and_legacy_settings():
         (["memory_query_delete", "memory_query", "schedule_task", "poke"], ["poke"]),
         (
             ["memory_query(记忆查询)", "schedule_task(定时任务)", "task_board"],
-            ["task_board"],
+            ["memo"],
         ),
     ]:
         assert (

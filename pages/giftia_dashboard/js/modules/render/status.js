@@ -45,24 +45,15 @@ export function renderBotStatus(items) {
         const action = item.action || "无";
         const botArg = encodeStatusArg(item.bot_name);
         const groupArg = encodeStatusArg(item.group_or_user_id);
-        const taskBoard = item.task_board || null;
-        const taskStats = taskBoard?.stats || {};
-        const taskLimit = taskBoard?.limit || 0;
-        const showTaskBoard = taskBoard?.enabled && (taskLimit > 0 || (taskStats.total || 0) > 0);
-        const taskBoardHtml = showTaskBoard ? `
-                <button class="status-task-board" onclick="window.openTaskBoardModal('${botArg}', '${groupArg}')" title="查看短期任务">
+        const memos = item.memos || {};
+        const taskBoardHtml = `
+                <button class="status-task-board" onclick="window.openTaskBoardModal('${botArg}', '${groupArg}', '${memos.enabled ? "memo" : "scheduled"}')">
                     <div class="status-task-header">
-                        <span class="status-task-title">短期任务</span>
-                        <span class="status-task-count">${taskStats.active || 0}/${taskLimit}</span>
-                    </div>
-                    <div class="status-task-stats">
-                        <span>活跃 ${taskStats.active || 0}</span>
-                        <span>完成 ${taskStats.completed || 0}</span>
-                        <span>取消 ${taskStats.canceled || 0}</span>
-                        <span>过期 ${taskStats.expired || 0}</span>
+                        <span class="status-task-title">${memos.enabled ? "备忘录" : "定时任务"}</span>
+                        ${memos.enabled ? `<span class="status-task-count">${memos.items.length}/${memos.limit}</span>` : ""}
                     </div>
                 </button>
-        ` : "";
+        `;
 
         const customStatus = item.custom_status || {};
         const customStatusEntries = Object.entries(customStatus).filter(([k, v]) => k && v);

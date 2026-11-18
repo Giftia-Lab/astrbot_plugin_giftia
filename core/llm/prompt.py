@@ -10,9 +10,9 @@ from ..utils.relation_display import build_relation_display
 from ..utils.schemas import (
     ACCOUNT_TYPE_LABELS,
     MediaCaption,
+    Memo,
     MessageData,
     SessionRecallMemory,
-    ShortTask,
     Status,
     XmlLlmResult,
     extract_media_ids,
@@ -90,8 +90,8 @@ def build_decision_prompt(
     user_profile: str | dict | None = None,
     group_profile: str | None = None,
     active_user_briefs: list[dict] | None = None,
-    short_tasks: list[ShortTask] | None = None,
-    short_task_limit: int = 3,
+    memos: list[Memo] | None = None,
+    memo_limit: int = 3,
     message_truncate_limit: int = 1500,
     media_captions: list[MediaCaption] | None = None,
     slang_entries: list[dict] | None = None,
@@ -172,10 +172,7 @@ def build_decision_prompt(
     if group_rules_text:
         user_prompt.append(f"<group_rules>\n{group_rules_text}\n</group_rules>")
 
-    # 2. 半静态上下文区：任务看板、活跃成员摘要、合并转发索引与历史消息
-    task_board_block = build_short_task_board(short_tasks, short_task_limit)
-    if task_board_block:
-        user_prompt.append(task_board_block)
+    # 2. 半静态上下文区：活跃成员摘要、合并转发索引与历史消息
     active_user_briefs_block = build_active_user_briefs(active_user_briefs)
     if active_user_briefs_block:
         user_prompt.append(active_user_briefs_block)
@@ -189,7 +186,9 @@ def build_decision_prompt(
     # 近期消息
     if copied_recent:
         recent_messages_str = "\n".join(
-            parse_message_to_str(msg, truncate_limit=message_truncate_limit)
+            parse_message_to_str(
+                msg, truncate_limit=message_truncate_limit, include_thought=True
+            )
             for msg in copied_recent
         )
         user_prompt.append(
@@ -215,6 +214,9 @@ def build_decision_prompt(
         )
         if user_profile_block:
             user_prompt.append(user_profile_block)
+    memo_block = build_memo_block(memos, memo_limit)
+    if memo_block:
+        user_prompt.append(memo_block)
     persistent_status_block = build_persistent_status_block(bot_status)
     if persistent_status_block:
         user_prompt.append(persistent_status_block)
@@ -227,7 +229,9 @@ def build_decision_prompt(
         user_prompt.append(slang_block)
     if copied_pending:
         pending_text = "\n".join(
-            parse_message_to_str(msg, truncate_limit=message_truncate_limit)
+            parse_message_to_str(
+                msg, truncate_limit=message_truncate_limit, include_thought=True
+            )
             for msg in copied_pending
         )
         user_prompt.append(f"<pending_messages>\n{pending_text}\n</pending_messages>")
@@ -407,8 +411,8 @@ def build_reply_prompt(
     user_profile: str | dict | None = None,
     group_profile: str | None = None,
     active_user_briefs: list[dict] | None = None,
-    short_tasks: list[ShortTask] | None = None,
-    short_task_limit: int = 3,
+    memos: list[Memo] | None = None,
+    memo_limit: int = 3,
     other_data: list[str] | None = None,
     bot_sticker: str | None = None,
     message_truncate_limit: int = 1500,
@@ -507,9 +511,6 @@ def build_reply_prompt(
     group_rules_text = (group_profile or "").strip()
     if group_rules_text:
         user_prompt.append(f"<group_rules>\n{group_rules_text}\n</group_rules>")
-    task_board_block = build_short_task_board(short_tasks, short_task_limit)
-    if task_board_block:
-        user_prompt.append(task_board_block)
     active_user_briefs_block = build_active_user_briefs(active_user_briefs)
     if active_user_briefs_block:
         user_prompt.append(active_user_briefs_block)
@@ -536,7 +537,9 @@ def build_reply_prompt(
     # 近期消息
     if copied_recent:
         recent_messages_str = "\n".join(
-            parse_message_to_str(msg, truncate_limit=message_truncate_limit)
+            parse_message_to_str(
+                msg, truncate_limit=message_truncate_limit, include_thought=True
+            )
             for msg in copied_recent
         )
         user_prompt.append(
@@ -580,6 +583,9 @@ def build_reply_prompt(
         user_profile_block = build_user_profile_block(**profile)
         if user_profile_block:
             user_prompt.append(user_profile_block)
+    memo_block = build_memo_block(memos, memo_limit)
+    if memo_block:
+        user_prompt.append(memo_block)
     persistent_status_block = build_persistent_status_block(bot_status)
     if persistent_status_block:
         user_prompt.append(persistent_status_block)
@@ -609,7 +615,9 @@ def build_reply_prompt(
         user_prompt.append(slang_block)
     if copied_reply:
         reply_text = "\n".join(
-            parse_message_to_str(msg, truncate_limit=message_truncate_limit)
+            parse_message_to_str(
+                msg, truncate_limit=message_truncate_limit, include_thought=True
+            )
             for msg in copied_reply
         )
         user_prompt.append(f"<reply_messages>\n{reply_text}\n</reply_messages>")
@@ -712,6 +720,7 @@ def build_reply_review_prompt(
                     ),
                 ),
                 truncate_limit=0,
+                include_thought=True,
             )
             for message in messages
         ]
@@ -784,8 +793,19 @@ def truncate_message_content(content: str | None, limit: int = 500) -> str:
     return content
 
 
-def parse_message_to_str(message: MessageData, truncate_limit: int = 500) -> str:
-    """构建xml格式的消息，用于提示词传递聊天记录"""
+def parse_message_to_str(
+    message: MessageData, truncate_limit: int = 500, *, include_thought: bool = False
+) -> str:
+    """Render one message, optionally with its local conversation annotation.
+
+    Args:
+        message: Original timeline entry.
+        truncate_limit: Character budget for its content.
+        include_thought: Include private annotations in the owning conversation.
+
+    Returns:
+        XML for the message and any visible thought.
+    """
     if getattr(message, "role", "message") == "operation_log":
         time_str = format_time_to_hhmmss(message.time) if message.time else ""
         content_str = message.content.strip() if message.content else ""
@@ -805,7 +825,10 @@ def parse_message_to_str(message: MessageData, truncate_limit: int = 500) -> str
                 value = format_time_to_hhmmss(value)
             props += f" {prop}={quoteattr(str(value))}"
     truncated_content = truncate_message_content(message.content, limit=truncate_limit)
-    return f"<message{props}>{truncated_content}</message>"
+    text = f"<message{props}>{truncated_content}</message>"
+    if include_thought and message.pinned_thought and not message.is_recalled:
+        text += f"\n<pinned_thought message_id={quoteattr(message.message_id)}>{escape(message.pinned_thought)}</pinned_thought>"
+    return text
 
 
 def parse_caption_to_str(media_caption: MediaCaption) -> str:
@@ -895,7 +918,7 @@ def parse_status_to_str(status: Status) -> str:
         energy_val = 100
     status_str = f"""心情：{status.mood}
 状态：{status.state}
-思考：{status.memory}
+思考：{"" if status.memory_pinned else status.memory}
 动作：{status.action}
 能量：{energy_val:.0f}"""
 
@@ -1235,37 +1258,15 @@ def build_active_user_briefs(active_user_briefs: list[dict] | None) -> str:
     return "<active_user_briefs>\n" + "\n".join(user_blocks) + "\n</active_user_briefs>"
 
 
-def build_short_task_board(
-    short_tasks: list[ShortTask] | None, short_task_limit: int = 3
-) -> str:
-    if not short_tasks:
+def build_memo_block(memos: list[Memo] | None, memo_limit: int = 3) -> str:
+    if not memos:
         return ""
-
-    task_blocks = []
-    for task in short_tasks:
-        if not task or task.status != "active":
-            continue
-
-        props = f" id={quoteattr(str(task.task_id))}"
-        props += f" creator_user_id={quoteattr(str(task.creator_user_id))}"
-        if task.creator_nickname:
-            props += f" creator_nickname={quoteattr(str(task.creator_nickname))}"
-        if task.created_at:
-            props += f" created_at={quoteattr(str(task.created_at))}"
-        if task.expires_at:
-            props += f" expires_at={quoteattr(str(task.expires_at))}"
-
-        task_blocks.append(f"<task{props}>{escape(task.content)}</task>")
-
-    if not task_blocks:
-        return ""
-
-    return (
-        f"<task_board active_count={quoteattr(str(len(task_blocks)))} "
-        f"limit={quoteattr(str(short_task_limit))}>\n"
-        + "\n".join(task_blocks)
-        + "\n</task_board>"
-    )
+    entries = [
+        f"<memo id={quoteattr(memo.memo_id)} created_at={quoteattr(memo.created_at)} "
+        f"remaining={quoteattr(memo.remaining)}>{escape(memo.content)}</memo>"
+        for memo in memos
+    ]
+    return f'<memos limit="{memo_limit}">\n' + "\n".join(entries) + "\n</memos>"
 
 
 def format_time_to_hhmmss(db_value: str) -> str:

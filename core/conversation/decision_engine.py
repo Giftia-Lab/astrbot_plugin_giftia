@@ -355,14 +355,11 @@ class DecisionEngine:
             self_id=event.get_self_id(),
             limit=self.plugin.tools_config.get("active_user_brief_limit", 10),
         )
-        short_tasks = []
-        short_task_limit = self.plugin.tools_config.get("task_board_max_active", 3)
-        if hasattr(self.plugin, "task_board"):
-            short_tasks = await self.plugin.task_board.get_active_tasks(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-            )
-            short_task_limit = self.plugin.task_board.max_active_tasks()
+        memos = []
+        memo_limit = 0
+        if hasattr(self.plugin, "memos"):
+            memos = await self.plugin.memos.list_active(bot_name, group_or_user_id)
+            memo_limit = self.plugin.memos.limit
 
         # 读取已有缓存的媒体转述（仅读缓存，非阻塞），用于轻量内联
         all_for_caption = []
@@ -394,8 +391,8 @@ class DecisionEngine:
             group_profile=group_profile,
             user_profiles=user_profiles,
             active_user_briefs=active_user_briefs,
-            short_tasks=short_tasks,
-            short_task_limit=short_task_limit,
+            memos=memos,
+            memo_limit=memo_limit,
             message_truncate_limit=getattr(
                 self.plugin, "reply_message_truncate_limit", 1500
             ),

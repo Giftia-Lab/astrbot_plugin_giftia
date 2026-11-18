@@ -468,6 +468,29 @@ class DataCache:
         status.timestamp = current_time
         return status
 
+    async def pin_thought(
+        self, bot_name: str, group_id: str, message_id: str, thought: str
+    ) -> bool:
+        """Publish a durable snapshot to both cold and warm local history.
+
+        Args:
+            bot_name: Owning bot configuration.
+            group_id: Owning conversation.
+            message_id: The accepted turn's anchor.
+            thought: Its private thought text.
+
+        Returns:
+            Whether the message still exists and can carry the snapshot.
+        """
+        saved = await self.db.chat_history_repo.pin_thought(
+            bot_name, group_id, message_id, thought
+        )
+        if saved:
+            for message in self.recent_messages.get(f"{bot_name}:{group_id}", ()):
+                if message.message_id == message_id:
+                    message.pinned_thought = thought
+        return saved
+
     async def set_message_recalled(
         self, bot_name: str, group_or_user_id: str, message_ids: list[str]
     ) -> None:
@@ -549,7 +572,7 @@ class DataCache:
         status_data = asdict(status)
         # 仅对非空值进行差分覆盖
         for key, value in status_data.items():
-            if key in ("timestamp", "last_updated"):
+            if key in ("timestamp", "last_updated", "memory_pinned"):
                 continue
             if key == "custom_status":
                 if isinstance(value, dict) and value:
@@ -558,6 +581,8 @@ class DataCache:
                     current_status.custom_status.update(value)
             elif value is not None and value != "":
                 setattr(current_status, key, value)
+                if key == "memory":
+                    current_status.memory_pinned = status.memory_pinned
         await self.db.upsert_bot_status(
             bot_name=bot_name,
             group_or_user_id=group_id,

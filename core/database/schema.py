@@ -46,6 +46,7 @@ TABLE_DEFINITIONS = (
         is_recalled INTEGER,
         processing_status TEXT DEFAULT 'history',
         memory_status TEXT NOT NULL DEFAULT 'unseen',
+        pinned_thought TEXT,
         created_at DATETIME,
         updated_at DATETIME
     )
@@ -101,6 +102,7 @@ TABLE_DEFINITIONS = (
         mood TEXT,
         state TEXT,
         memory TEXT,
+        memory_pinned INTEGER NOT NULL DEFAULT 0,
         action TEXT,
         energy TEXT,
         custom_status TEXT,
@@ -255,7 +257,8 @@ TABLE_DEFINITIONS = (
         total_tokens INTEGER DEFAULT 0,
         extra_info TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        call_count INTEGER DEFAULT 1
+        call_count INTEGER DEFAULT 1,
+        usage_missing_calls INTEGER DEFAULT 0
     )
     """,
     """
@@ -272,6 +275,7 @@ TABLE_DEFINITIONS = (
         total_tokens INTEGER DEFAULT 0,
         status TEXT,
         call_count INTEGER DEFAULT 0,
+        usage_missing_calls INTEGER DEFAULT 0,
         UNIQUE(date, bot_name, group_or_user_id, type, provider_id, model_name, status)
     )
     """,

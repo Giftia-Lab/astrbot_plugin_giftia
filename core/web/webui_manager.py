@@ -202,35 +202,22 @@ class WebUIManager:
             desc="Update bot mood/state",
         )
         ctx.register_web_api(
-            route="/astrbot_plugin_giftia/task_board",
-            view_handler=self.web_api.get_task_board,
+            route="/astrbot_plugin_giftia/memos",
+            view_handler=self.web_api.get_memos,
             methods=["GET"],
-            desc="Get short task board",
+            desc="List session memos",
         )
-        ctx.register_web_api(
-            route="/astrbot_plugin_giftia/task_board/create",
-            view_handler=self.web_api.create_task_board,
-            methods=["POST"],
-            desc="Create short task",
-        )
-        ctx.register_web_api(
-            route="/astrbot_plugin_giftia/task_board/update",
-            view_handler=self.web_api.update_task_board,
-            methods=["POST"],
-            desc="Update short task",
-        )
-        ctx.register_web_api(
-            route="/astrbot_plugin_giftia/task_board/delete",
-            view_handler=self.web_api.delete_task_board,
-            methods=["POST"],
-            desc="Delete short task",
-        )
-        ctx.register_web_api(
-            route="/astrbot_plugin_giftia/task_board/clear",
-            view_handler=self.web_api.clear_task_board,
-            methods=["POST"],
-            desc="Clear short tasks by status",
-        )
+        for action, handler in (
+            ("add", self.web_api.add_memo),
+            ("renew", self.web_api.renew_memo),
+            ("delete", self.web_api.delete_memo),
+        ):
+            ctx.register_web_api(
+                route=f"/astrbot_plugin_giftia/memos/{action}",
+                view_handler=handler,
+                methods=["POST"],
+                desc=f"{action.capitalize()} session memo",
+            )
         ctx.register_web_api(
             route="/astrbot_plugin_giftia/scheduled_tasks",
             view_handler=self.web_api.get_scheduled_tasks,

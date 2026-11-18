@@ -26,6 +26,38 @@ async def schema_version(conn):
 
 
 @pytest.mark.asyncio
+async def test_model_usage_upgrade_preserves_existing_statistics(database):
+    await database.execute("BEGIN")
+    for version, migration in migrations.MIGRATIONS:
+        if version >= 7:
+            break
+        await migration(database)
+        await database.execute(f"PRAGMA user_version={version}")
+    await database.execute(
+        "INSERT INTO token_usage (type, total_tokens, call_count) VALUES ('reply', 42, 2)"
+    )
+    await database.execute(
+        "INSERT INTO token_daily_stats (date, type, total_tokens, call_count) "
+        "VALUES ('2026-11-01', 'reply', 100, 5)"
+    )
+    await database.commit()
+    await schema.initialize_database(database)
+    for table, tokens, calls in (("token_usage", 42, 2), ("token_daily_stats", 100, 5)):
+        async with database.execute(
+            f"SELECT total_tokens, call_count, usage_missing_calls FROM {table}"
+        ) as cursor:
+            assert await cursor.fetchone() == (tokens, calls, 0)
+        await database.execute(f"UPDATE {table} SET usage_missing_calls=1")
+    await database.commit()
+    await schema.initialize_database(database)
+    for table in ("token_usage", "token_daily_stats"):
+        async with database.execute(
+            f"SELECT usage_missing_calls FROM {table}"
+        ) as cursor:
+            assert await cursor.fetchone() == (1,)
+
+
+@pytest.mark.asyncio
 async def test_group_metadata_upgrade_preserves_rules_and_names_on_restart(database):
     await database.execute("BEGIN")
     for version, migration in migrations.MIGRATIONS:
@@ -49,6 +81,85 @@ async def test_group_metadata_upgrade_preserves_rules_and_names_on_restart(datab
         assert (await cursor.fetchone())[0] == "Existing group rules"
     async with database.execute("SELECT group_name FROM group_metadata") as cursor:
         assert (await cursor.fetchone())[0] == "Group name"
+    assert await schema_version(database) == migrations.CURRENT_SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("starting_version", [6, 7])
+async def test_upgrade_keeps_active_memos_and_unpinned_state(database, starting_version):
+    for version, migration in migrations.MIGRATIONS:
+        if version > starting_version:
+            break
+        await migration(database)
+        await database.execute(f"PRAGMA user_version={version}")
+    await database.execute(
+        """INSERT INTO short_tasks (task_id, bot_name, group_or_user_id, content, status, expires_at)
+           VALUES ('original-id', 'bot', 'group', 'Original plan', 'active', '2099-01-01 12:34:56')"""
+    )
+    await database.execute(
+        "INSERT INTO bot_status (bot_name, group_or_user_id, memory) VALUES ('bot', 'group', 'Original thought')"
+    )
+    await database.execute(
+        "INSERT INTO chat_history (bot_name, group_or_user_id, message_id, content) VALUES ('bot', 'group', '1', 'Original message')"
+    )
+    await database.commit()
+    for _ in range(2):
+        await schema.initialize_database(database)
+    async with database.execute(
+        "SELECT task_id, content, expires_at FROM short_tasks"
+    ) as cursor:
+        assert await cursor.fetchone() == (
+            "original-id",
+            "Original plan",
+            "2099-01-01 12:34:56",
+        )
+    async with database.execute(
+        "SELECT memory, memory_pinned FROM bot_status"
+    ) as cursor:
+        assert await cursor.fetchone() == ("Original thought", 0)
+    async with database.execute(
+        "SELECT content, pinned_thought FROM chat_history"
+    ) as cursor:
+        assert await cursor.fetchone() == ("Original message", None)
+
+
+@pytest.mark.asyncio
+async def test_memo_branch_v7_keeps_snapshots_and_upgrades_call_statistics(database):
+    for version, migration in migrations.MIGRATIONS:
+        if version >= 7:
+            break
+        await migration(database)
+    await database.execute("ALTER TABLE chat_history ADD COLUMN pinned_thought TEXT")
+    await database.execute(
+        "ALTER TABLE bot_status ADD COLUMN memory_pinned INTEGER NOT NULL DEFAULT 0"
+    )
+    await database.execute(
+        "INSERT INTO chat_history (bot_name, group_or_user_id, message_id, pinned_thought) "
+        "VALUES ('bot', 'group', '1', 'I picked 4')"
+    )
+    await database.execute(
+        "INSERT INTO bot_status (bot_name, group_or_user_id, memory_pinned) VALUES ('bot', 'group', 1)"
+    )
+    await database.execute(
+        "INSERT INTO token_usage (type, total_tokens, call_count) VALUES ('reply', 42, 2)"
+    )
+    await database.execute(
+        "INSERT INTO token_daily_stats (date, type, total_tokens, call_count) "
+        "VALUES ('2026-11-01', 'reply', 100, 5)"
+    )
+    await database.execute("PRAGMA user_version=7")
+    await database.commit()
+
+    await schema.initialize_database(database)
+    async with database.execute("SELECT pinned_thought FROM chat_history") as cursor:
+        assert await cursor.fetchone() == ("I picked 4",)
+    async with database.execute("SELECT memory_pinned FROM bot_status") as cursor:
+        assert await cursor.fetchone() == (1,)
+    for table, tokens, calls in (("token_usage", 42, 2), ("token_daily_stats", 100, 5)):
+        async with database.execute(
+            f"SELECT total_tokens, call_count, usage_missing_calls FROM {table}"
+        ) as cursor:
+            assert await cursor.fetchone() == (tokens, calls, 0)
     assert await schema_version(database) == migrations.CURRENT_SCHEMA_VERSION
 
 

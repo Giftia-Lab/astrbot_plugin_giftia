@@ -7,196 +7,49 @@ from astrbot.api.web import error_response, json_response, request
 
 
 class TaskApi:
-    """Short task board & scheduled task APIs."""
+    """Session memo and scheduled task APIs."""
 
-    def _serialize_short_task(self, task) -> dict:
-        return {
-            "task_id": task.task_id,
-            "bot_name": task.bot_name,
-            "group_or_user_id": task.group_or_user_id,
-            "creator_user_id": task.creator_user_id,
-            "creator_nickname": task.creator_nickname,
-            "content": task.content,
-            "status": task.status,
-            "closed_by_user_id": task.closed_by_user_id,
-            "close_reason": task.close_reason,
-            "expires_at": task.expires_at,
-            "created_at": task.created_at,
-            "updated_at": task.updated_at,
-        }
-
-    async def get_task_board(self):
-        """Get short task board for a session."""
+    async def get_memos(self):
         try:
-            bot_name = request.query.get("bot_name")
-            group_or_user_id = request.query.get("group_or_user_id")
-
-            if not bot_name or not group_or_user_id:
+            bot = request.query.get("bot_name")
+            session = request.query.get("group_or_user_id")
+            if not bot or not session:
                 return error_response("缺少 bot_name 或 group_or_user_id 参数")
-            if not hasattr(self.giftia, "task_board"):
-                return error_response("短期任务看板不可用")
+            data = await self.giftia.memos.dashboard(bot, session)
+            return json_response({"status": "success", "data": data})
+        except Exception as error:
+            logger.exception("[Giftia API] Could not read session memos")
+            return error_response(f"获取备忘录失败：{error}")
 
-            tasks = await self.giftia.task_board.get_all_tasks(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-            )
-            stats = await self.giftia.db.get_short_task_stats(
-                bot_name, group_or_user_id
-            )
-            return json_response(
-                {
-                    "status": "success",
-                    "data": {
-                        "enabled": self.giftia.task_board.is_enabled(),
-                        "limit": self.giftia.task_board.max_active_tasks(),
-                        "stats": stats,
-                        "items": [self._serialize_short_task(task) for task in tasks],
-                    },
-                }
-            )
-        except Exception as e:
-            logger.error(f"[Giftia API] get_task_board error: {e}")
-            return error_response(f"获取短期任务失败: {str(e)}")
+    async def add_memo(self):
+        return await self._change_memo("add")
 
-    async def create_task_board(self):
-        """Create an active short task using the existing board limits.
+    async def renew_memo(self):
+        return await self._change_memo("renew")
 
-        Returns:
-            A JSON response containing the new task or a validation error.
-        """
+    async def delete_memo(self):
+        return await self._change_memo("delete")
+
+    async def _change_memo(self, action: str):
         try:
             body = await request.json()
-            bot_name = body.get("bot_name")
-            group_or_user_id = body.get("group_or_user_id")
-            content = str(body.get("content") or "").strip()
-            expires_at = str(body.get("expires_at") or "").strip()
-            if not bot_name or not group_or_user_id:
+            bot, session = body.get("bot_name"), body.get("group_or_user_id")
+            if not bot or not session:
                 return error_response("缺少 bot_name 或 group_or_user_id 参数")
-            if not content:
-                return error_response("任务内容不能为空")
-            if not hasattr(self.giftia, "task_board"):
-                return error_response("短期任务看板不可用")
-            if expires_at:
-                try:
-                    expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-                except ValueError:
-                    return error_response("过期时间格式错误")
-                if expiry <= datetime.now(expiry.tzinfo):
-                    return error_response("过期时间必须晚于当前时间")
-
-            ok, message, task = await self.giftia.task_board.create_task(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                creator_user_id="dashboard",
-                creator_nickname="任务看板",
-                content=content,
-                expires_at=expires_at or None,
+            memo_id = await self.giftia.memos.apply(
+                bot,
+                session,
+                action,
+                content=body.get("content", ""),
+                duration=body.get("duration", ""),
+                memo_id=body.get("memo_id", ""),
             )
-            if not ok:
-                return error_response(message)
-            return json_response(
-                {
-                    "status": "success",
-                    "message": message,
-                    "data": self._serialize_short_task(task),
-                }
-            )
-        except Exception as e:
-            logger.error(f"[Giftia API] create_task_board error: {e}")
-            return error_response(f"创建短期任务失败: {str(e)}")
-
-    async def update_task_board(self):
-        """Update a short task from dashboard without creator permission checks."""
-        try:
-            body = await request.json()
-            bot_name = body.get("bot_name")
-            group_or_user_id = body.get("group_or_user_id")
-            task_id = body.get("task_id")
-            content = body.get("content")
-            status = body.get("status")
-            expires_at = body.get("expires_at")
-
-            if not bot_name or not group_or_user_id or not task_id:
-                return error_response("缺少必要参数")
-            if not hasattr(self.giftia, "task_board"):
-                return error_response("短期任务看板不可用")
-
-            ok, message, task = await self.giftia.task_board.update_task_from_dashboard(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                task_id=task_id,
-                content=content or "",
-                status=status or "",
-                expires_at=expires_at or "",
-            )
-            if not ok:
-                return error_response(message)
-            return json_response(
-                {
-                    "status": "success",
-                    "message": message,
-                    "data": self._serialize_short_task(task) if task else None,
-                }
-            )
-        except Exception as e:
-            logger.error(f"[Giftia API] update_task_board error: {e}")
-            return error_response(f"更新短期任务失败: {str(e)}")
-
-    async def delete_task_board(self):
-        """Delete a short task from dashboard without creator permission checks."""
-        try:
-            body = await request.json()
-            bot_name = body.get("bot_name")
-            group_or_user_id = body.get("group_or_user_id")
-            task_id = body.get("task_id")
-
-            if not bot_name or not group_or_user_id or not task_id:
-                return error_response("缺少必要参数")
-            if not hasattr(self.giftia, "task_board"):
-                return error_response("短期任务看板不可用")
-
-            ok, message = await self.giftia.task_board.delete_task_from_dashboard(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                task_id=task_id,
-            )
-            if not ok:
-                return error_response(message)
-            return json_response({"status": "success", "message": message})
-        except Exception as e:
-            logger.error(f"[Giftia API] delete_task_board error: {e}")
-            return error_response(f"删除短期任务失败: {str(e)}")
-
-    async def clear_task_board(self):
-        """Clear short tasks by status filter for a session."""
-        try:
-            body = await request.json()
-            bot_name = body.get("bot_name")
-            group_or_user_id = body.get("group_or_user_id")
-            status = body.get("status") or "all"
-
-            if not bot_name or not group_or_user_id:
-                return error_response("缺少 bot_name 或 group_or_user_id 参数")
-            if not hasattr(self.giftia, "task_board"):
-                return error_response("短期任务看板不可用")
-
-            (
-                ok,
-                message,
-                count,
-            ) = await self.giftia.task_board.clear_tasks_from_dashboard(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                status=status,
-            )
-            if not ok:
-                return error_response(message)
-            return json_response(
-                {"status": "success", "message": message, "cleared_count": count}
-            )
-        except Exception as e:
-            logger.error(f"[Giftia API] clear_task_board error: {e}")
-            return error_response(f"清空短期任务失败: {str(e)}")
+            return json_response({"status": "success", "data": {"memo_id": memo_id}})
+        except ValueError as error:
+            return error_response(str(error))
+        except Exception as error:
+            logger.exception("[Giftia API] Could not change session memo")
+            return error_response(f"备忘操作失败：{error}")
 
     # ── Scheduled Task APIs ─────────────────────────────────────────────
 
@@ -298,7 +151,7 @@ class TaskApi:
                     ),
                     "group_or_user_id": group_or_user_id,
                     "user_id": "dashboard" if context["group_id"] else group_or_user_id,
-                    "user_name": "任务看板",
+                    "user_name": "WebUI",
                     "remind_message": remind_message,
                 },
             )

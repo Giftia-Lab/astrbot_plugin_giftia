@@ -1,18 +1,6 @@
-import logging
-import sys
-import types
 import unittest
 
 import aiosqlite
-
-if "astrbot.api" not in sys.modules:
-    astrbot_module = types.ModuleType("astrbot")
-    astrbot_api_module = types.ModuleType("astrbot.api")
-    astrbot_api_module.logger = logging.getLogger("astrbot")
-    astrbot_module.api = astrbot_api_module
-    sys.modules["astrbot"] = astrbot_module
-    sys.modules["astrbot.api"] = astrbot_api_module
-
 from core.database.schema import initialize_database
 
 

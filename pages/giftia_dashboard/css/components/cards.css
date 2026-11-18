@@ -300,23 +300,6 @@ html[data-theme="dark"] .status-thought-box {
     color: var(--font-secondary);
 }
 
-.status-task-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    padding-top: 6px;
-    border-top: 1px dashed var(--border-color);
-}
-
-.status-task-stats span {
-    padding: 2px 7px;
-    border-radius: 999px;
-    background-color: rgba(107, 114, 128, 0.08);
-    color: var(--font-secondary);
-    font-size: 11px;
-    line-height: 1.4;
-}
-
 .status-actions {
     display: flex;
     justify-content: flex-end;

@@ -1,19 +1,6 @@
 import asyncio
-import logging
-import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
-
-try:
-    import astrbot
-except ImportError:
-    import types
-    astrbot_module = types.ModuleType("astrbot")
-    astrbot_api_module = types.ModuleType("astrbot.api")
-    astrbot_api_module.logger = logging.getLogger("astrbot")
-    astrbot_module.api = astrbot_api_module
-    sys.modules["astrbot"] = astrbot_module
-    sys.modules["astrbot.api"] = astrbot_api_module
 
 from core.conversation.chat_manager import ChatManager
 
@@ -27,11 +14,17 @@ class SelfActionFilterTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.bot_map = {"bot_arisu": {"nickname": "Arisu"}}
         self.plugin.active_reply_counters = {}
         self.plugin.replying_status = {}
-        self.plugin.passive_memory_manager.check_and_trigger_passive_memory = AsyncMock()
+        self.plugin.passive_memory_manager.check_and_trigger_passive_memory = (
+            AsyncMock()
+        )
         self.chat_manager = ChatManager(self.plugin)
-        self.chat_manager.decision_engine.check_whitelists = MagicMock(return_value=True)
+        self.chat_manager.decision_engine.check_whitelists = MagicMock(
+            return_value=True
+        )
 
-    def _create_mock_event(self, self_id: str, sender_id: str, raw_message: dict | None = None):
+    def _create_mock_event(
+        self, self_id: str, sender_id: str, raw_message: dict | None = None
+    ):
         event = MagicMock()
         event.get_self_id = MagicMock(return_value=self_id)
         event.get_sender_id = MagicMock(return_value=sender_id)

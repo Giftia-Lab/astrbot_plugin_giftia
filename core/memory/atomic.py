@@ -100,7 +100,7 @@ class MemoryRecord(BaseModel):
     evidence: list[MemoryEvidence] = Field(
         min_length=1,
         max_length=20,
-        description="必填且非空，至少引用一条 new_messages 中的直接来源消息，每项只填写 source_id。",
+        description="只输出一项，填写 new_messages 中最直接说明该事实或事件的那条消息的 source_id，用于定位原对话。",
     )
 
 

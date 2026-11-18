@@ -228,6 +228,7 @@ class PassiveMemoryManager(PassiveSummaryTaskMixin):
         embedding_memories = await self.plugin.ltm.search_memory(
             bot_name=bot_name,
             group_or_user_id=None,
+            usage_group_or_user_id=group_or_user_id,
             query=query,
             limit=limit,
             threshold=threshold,

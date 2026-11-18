@@ -36,6 +36,7 @@ REAL_EVENT_INSTANCE_ATTRS: tuple[str, ...] = (
     "_extras",
     "_result",
     "_force_stopped",
+    "_execution_active",
     "_has_send_oper",
     "_temporary_local_files",
     "bot",

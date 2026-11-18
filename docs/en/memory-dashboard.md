@@ -34,6 +34,18 @@ Open **会话状态 (Conversation status)** and choose a bot using **BOT名称 (
 
 ![Bot-filtered conversation status with group names and IDs, using example data](../images/status-bot-filter.jpg)
 
+### Session memos
+
+Open **备忘录 (Memos)** on a conversation card. Choose **新增备忘 (Add memo)**, enter the text and choose a retention period. Each entry shows its text, creation time and time remaining in days, hours or minutes. **续期 (Extend)** adds the selected duration to the existing deadline. Deleting an entry or letting it expire frees a slot. The adjacent **定时任务 (Scheduled tasks)** tab handles scheduled reminders.
+
+The bot can add, delete and extend its own plans. Both reply decisions and formal replies see active memos for their conversation. Bot management controls availability per bot. The plugin's tool settings control the capacity per conversation and the default duration.
+
+![Conversation memos with creation time, remaining time and extension controls](../images/session-memos.jpg)
+
+### Thought snapshots
+
+A formal reply can mark its status with `<status pin="true">` to save that turn’s thought. In a guessing game the bot might privately pick 4 and tell the group “I’m ready, take a guess!” The snapshot accompanies the bot’s last message of the turn, or the last incoming message of a silent turn. It appears in local decision and reply context while its anchor is visible. Passive summarization and cross-group recall read the original conversation text.
+
 ## Group rules
 
 In **画像管理 (Profile management)**, switch **内容类型 (Content type)** to **群规 (Group rules)**, select a bot, and click **新建群规 (New group rules)**. Enter the group ID and rule content, then save. Bots without existing rules can create their first entry directly. Saving selects the target group; use **编辑 (Edit)** on a card to change its rules. Each bot and group ID has one rule entry, so saving replaces existing content for that pair.

@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from core.bot.bot_config_manager import DEFAULT_BOT_CONFIG, BotConfigManager
 from core.conversation import chat_manager as chat_module
+from core.conversation.action_dispatcher import ActionDispatcher
 from core.conversation.chat_manager import ChatManager
 from core.database.data_cache import DataCache
 from core.database.database import Database
@@ -198,6 +199,126 @@ async def test_formal_reply_loads_image_metadata_without_enabled_captions(
             message for message in history if message.message_id == placeholder
         ).content
         == placeholder
+    )
+
+
+@pytest.mark.asyncio
+async def test_spoken_thought_is_private_and_survives_a_new_status(runtime):
+    plugin = runtime.plugin
+    plugin.get_bot_config = plugin.bot_map.get
+    plugin.min_reply_interval = plugin.max_reply_interval = 0
+    plugin.message_parser = SimpleNamespace(
+        chain_to_result=AsyncMock(
+            side_effect=lambda chain, **_: SimpleNamespace(
+                content=chain[0].text, media_id_list=[], forward_messages=[]
+            )
+        )
+    )
+    del plugin.data_cache.get_bot_status, plugin.data_cache.set_bot_status
+    dispatcher = ActionDispatcher(plugin)
+    transport = AsyncMock()
+
+    async def deliver(**kwargs):
+        kwargs["event"].send = transport
+        await dispatcher.dispatch_actions(**kwargs)
+
+    runtime.manager.action_dispatcher.dispatch_actions.side_effect = deliver
+    parser = XmlParse(None, None)
+    plugin.call_llm.call_llm_reply.side_effect = [
+        await parser.decode_llm_xml(
+            '<status pin="true">思考: 数字是4</status><message>想好了</message><message>你猜</message>',
+            "group",
+        ),
+        await parser.decode_llm_xml("<status>思考: 有人换了话题</status>", "group"),
+        await parser.decode_llm_xml(
+            '<status pin="false">思考: 又聊回来了</status>', "group"
+        ),
+    ]
+    for mid in ("猜数字", "晚饭吃什么", "我猜是三"):
+        await runtime.send(mid)
+        await runtime.drain()
+    assert [call.args[0].chain[0].text for call in transport.await_args_list] == [
+        "想好了",
+        "你猜",
+    ]
+    history = await plugin.db.get_messages("group", "bot", 20)
+    assert [(m.content, m.pinned_thought) for m in history if m.pinned_thought] == [
+        ("你猜", "数字是4")
+    ]
+    prompt = plugin.call_llm.call_llm_reply.call_args.kwargs["user_prompt"]
+    root = fromstring(f"<context>{prompt}</context>")
+    assert [t.text for t in root.findall(".//pinned_thought")] == ["数字是4"]
+    assert "有人换了话题" in root.find("status").text
+
+
+@pytest.mark.asyncio
+async def test_silent_thought_snapshot_follows_its_message_only_in_this_conversation(
+    runtime,
+):
+    plugin = runtime.plugin
+    plugin.get_bot_config = plugin.bot_map.get
+    runtime.manager.action_dispatcher.dispatch_actions = ActionDispatcher(
+        plugin
+    ).dispatch_actions
+    plugin.min_msg_number = 3
+    plugin.msg_number = 3
+    cache, repo = plugin.data_cache, plugin.db.chat_history_repo
+    # Use the real status cache as well: a pinned secret must disappear even
+    # when later turns omit the thought field entirely.
+    del cache.get_bot_status, cache.set_bot_status
+    parser = XmlParse(None, None)
+    secret = "我选的数字是 4 & 只有我知道。"
+    pinned = await parser.decode_llm_xml(
+        '<status pin="true">心情: 好奇\n思考: 我选的数字是 4 &amp; 只有我知道。</status>',
+        "group",
+    )
+    empty = await parser.decode_llm_xml(
+        '<status pin="true">心情: 平静</status>', "group"
+    )
+    plugin.call_llm.call_llm_reply.side_effect = [
+        pinned,
+        empty,
+        XmlLlmResult(),
+        XmlLlmResult(),
+    ]
+    await runtime.send("猜我想的数字")
+    await runtime.drain()
+    assert (await plugin.db.get_bot_status("group", "bot")).memory == secret
+    cache.recent_messages.clear()
+    cache.bot_status.clear()
+    for mid, visible in (("另外的话题", True), ("我猜是五", True), ("下一轮", False)):
+        await runtime.send(mid)
+        await runtime.drain()
+        prompt = plugin.call_llm.call_llm_reply.call_args.kwargs["user_prompt"]
+        root = fromstring(f"<context>{prompt}</context>")
+        snapshots = root.findall(".//pinned_thought")
+        assert [snap.text for snap in snapshots] == ([secret] if visible else [])
+        assert ("我选的数字" in prompt) is visible
+        if visible:
+            assert snapshots[0].get("message_id") == "猜我想的数字"
+            assert (
+                root.find(".//message[@message_id='猜我想的数字']").text
+                == "猜我想的数字"
+            )
+
+    await repo.mark_messages_observed("bot", "group", ["猜我想的数字"])
+    pending = await repo.get_pending_memory_messages("bot", "group", 0, 100, 20)
+    assert [(m.content, m.pinned_thought) for m in pending] == [("猜我想的数字", "")]
+    # The cross-group query has a twenty-minute window.
+    await plugin.db.conn.execute(
+        "UPDATE chat_history SET created_at=? WHERE message_id=?",
+        (datetime.now().isoformat(), "猜我想的数字"),
+    )
+    await plugin.db.conn.commit()
+    cross = await repo.get_cross_group_pending_context("bot", "other", ["user"])
+    assert [(m.content, m.pinned_thought) for m in cross["group"]] == [
+        ("猜我想的数字", "")
+    ]
+    cached = await plugin.db.get_messages("group", "bot", 20)
+    decision = build_decision_prompt("user", "", cached, [], Status())
+    assert (
+        fromstring(f"<context>{decision}</context>").find(".//pinned_thought").text
+        == secret
     )
 
 
@@ -689,7 +810,9 @@ async def test_rejected_draft_restores_batch_and_regenerates_without_review(
             await runtime.send("B")
             return XmlLlmResult(
                 msg_chains=[[Plain("rejected")]],
-                status=Status(mood="rejected"),
+                status=Status(
+                    mood="rejected", memory="discarded secret", memory_pinned=True
+                ),
                 add_stickers=["must not be collected"],
                 tts_segments=[TTSRequest(text="must not be spoken")],
             )

@@ -1726,6 +1726,7 @@ class ChatManager:
                 "plugins_name": None,
                 "_result": None,
                 "_force_stopped": False,
+                "_execution_active": False,
                 "_has_send_oper": False,
                 "_temporary_local_files": [],
                 "unified_msg_origin": unified_msg_origin,

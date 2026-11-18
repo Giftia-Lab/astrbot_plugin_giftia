@@ -38,9 +38,9 @@ PROFILE_SOURCE_PRIVACY_GUIDE = (
     "非本会话互动记录若可能涉及隐私，则不能对外披露，除非取得同一用户明确许可。"
 )
 ACCOUNT_TYPE_GUIDE = "画像中的账号类型表示平台账号类别；普通 QQ 账号也可能是AI机器人在使用，未知表示尚未确认。"
-TASK_BOARD_USAGE_GUIDE = (
-    "任务看板中的任务默认保持进行中；除非已实际完成任务要求，"
-    "或用户明确确认完成，否则不要变更为完成。"
+SESSION_NOTES_GUIDE = (
+    "会话备忘录 <memos> 记录你想在期限内留意的计划，可以在合适的时机自然提起。"
+    "<pinned_thought> 是你在这段对话中当时的想法，仅作自己理解后续话题的背景。"
 )
 SLANG_USAGE_GUIDE = (
     "`<slang>` 需结合语境判断，不能仅因词汇命中就套用释义；"
@@ -76,8 +76,8 @@ REPLY_CONTEXT_GUIDE = (
     "## 成员画像与状态\n"
     "输入 `<status>` 是已有状态，输出 `<status>` 反映本次状态。\n"
     f"{ACCOUNT_TYPE_GUIDE}\n{PROFILE_SOURCE_PRIVACY_GUIDE}\n\n"
-    "## 任务与黑话\n"
-    f"{TASK_BOARD_USAGE_GUIDE}\n{SLANG_USAGE_GUIDE}\n\n"
+    "## 会话备忘、思考快照与黑话\n"
+    f"{SESSION_NOTES_GUIDE}\n{SLANG_USAGE_GUIDE}\n\n"
     f"{REPLY_MEDIA_CAPTION_GUIDE}\n"
     "`<media_content>` 的转述按 media_id 对应媒体标识；"
     "`<forwarded_messages>` 仅含索引与预览。"
@@ -201,10 +201,11 @@ def build_xml_instructions(
         "   <status>",
         '   心情: "心情文字"',
         '   状态: "当前状态"',
-        '   思考: "瞬时记忆，**优先记录下次对话需要验证的内容**（每次输出后覆写）"',
+        '   思考: "此刻的想法，可留空"',
         '   动作: "当前进行的动作或表情动作"',
         "   能量: 0-100 之间的数值（回复后会扣减或恢复）",
         "   </status>",
+        '   若这轮产生了值得过几轮接回的想法，用 <status pin="true"> 把本轮「思考」附在原消息旁。普通感想省略 pin，同一个念头只需记一次。',
         "2. **`<message>`**: 回复台词必须写入 `<message>`；长句可拆成多个并列标签，通常不超过 3 段。",
         '   - **引用回复**: `<message quote="消息ID">回复内容</message>`。',
         '3. **`<at>`**: `<at user_id="用户ID"/>` 可置于 `<message>` 内或并列输出；避免高频或无意义的 @。',
@@ -290,12 +291,12 @@ def build_xml_instructions(
             '  * **删除**: `<slang action="delete" term="词"/>`。删除错误或不再适用的解释。'
         )
 
-    if is_enabled(FeatureKey.TASK_BOARD):
+    if is_enabled(FeatureKey.MEMO):
         interactive_lines.append(
-            "- **短期任务看板(仅适用于非定时的事件驱动类任务，如：发现某人活跃时提醒他喝水)**:\n"
-            '  * **创建任务**: `<task_board action="create" user_id="创建者ID">一句自然语言任务</task_board>`。user_id 为任务创建者的用户 ID，必填。\n'
-            '  * **完成任务**: `<task_board action="complete" task_id="任务ID">完成原因</task_board>`。只有在你已经实际完成任务要求，或用户明确确认该任务已完成时才使用。\n'
-            '  * **取消任务**: `<task_board action="cancel" task_id="任务ID">取消原因</task_board>`。当用户明确要求取消，或任务已经不再需要时使用。'
+            "- **会话备忘录**：把你自己想留意的事或未来的打算写下来，到期自动移出。\n"
+            '  * 新增：<memo action="add" duration="2d">等她发上色版时看看那盏灯</memo>。留存时长使用正整数和 min、h 或 d。\n'
+            '  * 续期：<memo action="renew" id="备忘ID" duration="3h"/>。从原到期时间延长。\n'
+            '  * 删除：<memo action="delete" id="备忘ID"/>。使用 <memos> 中的 ID。'
         )
 
     if is_enabled(FeatureKey.PERSISTENT_STATUS):
@@ -324,24 +325,25 @@ def build_xml_instructions(
 
     # 3. 输出格式示例与提示
     example_lines = [
-        "<status>",
+        '<status pin="true">',
         '  心情: "开心"',
-        '  状态: "正在闲聊"',
-        '  思考: "今天天气真好！"',
+        '  状态: "正在玩猜数字游戏"',
+        '  思考: "她说能猜到我心里想的数字。我想的数字是 4，她肯定猜不到。"',
         '  动作: "微笑"',
         "  能量: 95",
         "</status>",
-        "<message>哼哼，今天也要元气满满哦！</message>",
+        "<message>想好了，你猜吧！</message>",
     ]
 
     prompt_lines.extend(
         [
             "",
             "## 输出格式示例",
-            "一个典型的 XML 输出结构应该如下：",
+            "猜数字时，需要过几轮核对自己选的答案，可以这样回复：",
             "```xml",
             *example_lines,
             "```",
+            "接下来聊到晚饭，像「忽然有点想吃面」这样的普通感想只写进常规 <status>。猜数字的那条快照会随原消息出现。",
             "注意：如果不想回复或无需回复，可以仅输出 `<status>` 以及一个包含空文本或省略的结构（甚至空回复拦截会在无变动时生效）。所有 XML 格式必须严格闭合，不允许有悬空的半截标签。回复台词中不要夹杂 Markdown（如粗体、代码块等）或 LaTeX、标点双引号等规范，遵循角色特有人设提示词中的具体要求。",
         ]
     )
@@ -372,7 +374,7 @@ associated_user_ids：事实涉及的群友完整账号列表，包含所有实�
 
 importance：仅对通过上述筛选的事实或事件输出 1~10 的整数，按其对后续互动的影响评分：1~3 为符合保存条件但影响较局部的具体事实或互动；4~6 为明确偏好或有用背景；7~8 为重要约定或长期适用的重要信息；9~10 为对互动有关键影响的明确底线或重大事实。
 
-evidence：必填且非空的证据数组，每条记忆至少引用一条 new_messages 中的直接来源消息。同一条记忆可引用多条消息，每条消息占一项，每项只填写一个 source_id，同一条消息只引用一次。
+每条记忆的 evidence 数组只填一项，用于定位原对话。归纳时可参考多条消息，引用时从 new_messages 中选择最直接说明该事实或事件的一条，只填写这条消息的 source_id。
 
 occurred_at：fact 省略或留空。仅 event 在实际发生时间明确时填写带时区的 ISO 时间，相对时间参照消息日期转换，不明确则留空。
 
@@ -623,6 +625,7 @@ def get_decision_rules(
 ## 会话数据说明
 {ACCOUNT_TYPE_GUIDE}
 {SLANG_USAGE_GUIDE}
+{SESSION_NOTES_GUIDE}
 
 ## 状态与检索判定 (use_rag)
 - **决策时效**：状态仅供参考，请根据当前最新消息流自主做出在线/回复决策。

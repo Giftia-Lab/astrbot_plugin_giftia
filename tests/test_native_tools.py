@@ -408,7 +408,7 @@ async def test_context_rules_stay_in_system_and_are_stable_across_recall_results
             "带 source 属性的记忆来自其他会话；",
             "这些记忆若可能涉及隐私",
             "非本会话互动记录若可能涉及隐私",
-            "任务默认保持进行中",
+            "记录你想在期限内留意的计划",
             "仅供理解对话",
         ):
             assert rule in context

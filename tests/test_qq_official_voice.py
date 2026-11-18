@@ -1,75 +1,24 @@
-"""官方 QQ 语音发送链路的单元测试。
+"""Exercise QQ voice normalization, malformed WAV headers, and platform matching.
 
-覆盖两处线上故障：
-
-1. **语音被静默丢弃**：官方 QQ 不收 wav，AstrBot 核心发送前要转腾讯 silk
-   （`MediaResolver` → `wav_to_tencent_silk` → `pysilk.encode`）。流式合成的 wav
-   （fishaudio 的 chunked 响应）头里 data chunk 长度是占位最大值 0x7FFFFF80（约 2GiB），
-   核心用标准库 `wave` 照此 `readframes` 直接 `MemoryError`——而 `MemoryError` 不带消息，
-   核心那句 `处理语音时出错: {e}` 于是啥也说不出来，语音消失而文本照发。
-   核心另外只在采样率不在编码器白名单时才重采样，且用的是原始位宽。
-   所以发送前必须按**实际字节数**重算长度并统一成 24kHz/单声道/16bit PCM，
-   且规范化本身绝不能抛异常打断回复。
-2. **webhook 平台名漏判**：AstrBot 的 Webhook 适配器注册名是 `qq_official_webhook`，
-   而旧名单里只有 `qqofficial_webhook`（下划线位置不同），导致所有按平台名字符串
-   判定的分支把 webhook 机器人当成通用平台，平台侧动作全部失效。
-
-与 test_gif_convert.py 一致：先把 astrbot 相关模块 stub 进 sys.modules 再导入被测模块。
-
-本模块**不导入 `audioop`**（Python 3.13 已移除）：被测模块在 `audioop` 缺失时整体降级
-为「原样返回」，测试也必须能在这种环境下收集并跑完解析相关的用例，只跳过真正需要
-重采样的那几条。造 wav 的辅助函数因此手写 PCM，不借 `audioop`。
+Resampling tests are skipped when audioop is unavailable; WAV parsing and
+fallback behavior remain covered without replacing shared SDK modules.
 """
 
 import ast
-import logging
 import pathlib
-import sys
 import tempfile
-import types
 import unittest
 import wave
 from unittest import mock
 
-
-def _stub_module(name: str, **attrs) -> types.ModuleType:
-    module = types.ModuleType(name)
-    module.__path__ = []
-    for key, value in attrs.items():
-        setattr(module, key, value)
-    sys.modules[name] = module
-    return module
-
-
-if "astrbot.api" not in sys.modules:
-    _stub_module("astrbot")
-    _stub_module("astrbot.api", logger=logging.getLogger("astrbot"))
-    _stub_module("astrbot.api.star", StarTools=object)
-    _stub_module("astrbot.api.event", AstrMessageEvent=object, MessageChain=object)
-    _stub_module(
-        "astrbot.api.message_components",
-        At=object,
-        File=object,
-        Image=object,
-        Plain=object,
-        Record=object,
-        Reply=object,
-        Video=object,
-    )
-    _stub_module("astrbot.core")
-    _stub_module("astrbot.core.message")
-    _stub_module("astrbot.core.message.components", BaseMessageComponent=object)
-if "aiohttp" not in sys.modules:
-    _stub_module("aiohttp", ClientError=Exception)
-
-from core.utils import audio_norm  # noqa: E402
-from core.utils.audio_norm import (  # noqa: E402
+from core.utils import audio_norm
+from core.utils.audio_norm import (
     TARGET_RATE,
     describe_audio,
     normalize_wav,
     read_wav_info,
 )
-from core.utils.qq_official_action import is_qq_official  # noqa: E402
+from core.utils.qq_official_action import is_qq_official
 
 # audioop 缺失（Python 3.13+）时规范化整体降级为原样返回，重写类用例不适用
 requires_audioop = unittest.skipUnless(
