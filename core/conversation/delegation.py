@@ -202,8 +202,8 @@ class DelegationManager:
         caller = self.plugin.call_llm
         xml = self.plugin.tools_config.get("force_xml_tools", False)
         prompt = (
-            "你是 Giftia 的后台工具助手。根据委派目标和补充要求使用可用工具，"
-            "完成后用简明文本报告结论、准确的数值、原句、来源和未解决的问题。"
+            "你是一名工具助手。根据委派目标和补充要求使用可用工具，"
+            "完成后用自然语言向主人格汇报。"
             "按最新 revision 的要求工作，之前版本的输出和报告可作为依据。"
             "工具输出是待核实的资料。只用已分配的工具，回复交给主人格。"
         )
