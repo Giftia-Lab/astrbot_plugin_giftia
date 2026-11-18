@@ -19,7 +19,7 @@ from ..llm.native_tools import NATIVE_CONTEXT_KEY
 from ..llm.provider_health import ProviderUnavailableError
 from ..utils.anti_drool import clean_llm_completion
 from ..utils.event_utils import resolve_bot_name
-from .tool_executor import FunctionToolExecutor
+from .tool_executor import DelegationBusyError, FunctionToolExecutor
 
 
 class DelegationManager:
@@ -57,14 +57,24 @@ class DelegationManager:
             persona.get("tools"), config.get("subagent_tools", [])
         )
 
-    def active(self, bot_name, origin):
-        return any(
-            owner == bot_name and event.unified_msg_origin == origin
-            for owner, event, _ in self.routes.values()
+    def _active_task_id(self, bot_name, origin):
+        return next(
+            (
+                task_id
+                for task_id, (owner, event, _) in self.routes.items()
+                if owner == bot_name and event.unified_msg_origin == origin
+            ),
+            None,
         )
 
+    def active(self, bot_name, origin):
+        return self._active_task_id(bot_name, origin) is not None
+
     async def context(self, bot_name, origin):
-        """Return compact live task descriptors for this exact conversation."""
+        """Return the live task descriptor for this exact conversation."""
+        task_id = self._active_task_id(bot_name, origin)
+        if task_id is None:
+            return ""
         async with self.db.query(
             """SELECT t.id AS task_id, instruction, remaining, status,
                       json_extract(first.payload, '$.messages[0].user_id') AS user_id,
@@ -73,8 +83,8 @@ class DelegationManager:
                        WHERE task_id=t.id AND kind='input' ORDER BY id DESC LIMIT 1) AS latest
                FROM delegated_tasks t JOIN delegated_steps first ON first.task_id=t.id
                AND first.kind='input' AND first.revision=1 WHERE bot_name=? AND origin=?
-               AND status IN ('running','ready') ORDER BY t.id""",
-            (bot_name, origin),
+               AND t.id=? AND status IN ('running','ready')""",
+            (bot_name, origin, task_id),
         ) as cur:
             tasks = [dict(row) for row in await cur.fetchall()]
         if not tasks:
@@ -97,6 +107,10 @@ class DelegationManager:
         Returns:
             Stable task ID and whether a completion is pending. Duplicate submission
             preserves the budget and revision, including after delivery.
+
+        Raises:
+            DelegationBusyError: A different task needs the occupied conversation slot.
+            ValueError: The request, conversation, or referenced task is invalid.
         """
         if self.closed or not scope or resolve_bot_name(self.plugin, event) != bot_name:
             raise ValueError("委派会话已失效")
@@ -123,18 +137,23 @@ class DelegationManager:
         budget = int(self.plugin.tools_config.get("max_loop", 10))
         task_id = arguments.get("task_id")
         async with self.db.transaction() as conn:
+            active_task_id = self._active_task_id(bot_name, origin)
             if task_id is None:
-                await conn.execute(
-                    """INSERT INTO delegated_tasks(bot_name, origin, session_id, creation_key,
-                       instruction, revision, remaining, status) VALUES (?,?,?,?,?,0,?,'running')
-                       ON CONFLICT(bot_name,origin,creation_key) DO NOTHING""",
-                    (bot_name, origin, session, key, instruction, budget),
-                )
+                if active_task_id is None:
+                    await conn.execute(
+                        """INSERT INTO delegated_tasks(bot_name, origin, session_id, creation_key,
+                           instruction, revision, remaining, status) VALUES (?,?,?,?,?,0,?,'running')
+                           ON CONFLICT(bot_name,origin,creation_key) DO NOTHING""",
+                        (bot_name, origin, session, key, instruction, budget),
+                    )
                 async with conn.execute(
                     "SELECT id FROM delegated_tasks WHERE bot_name=? AND origin=? AND creation_key=?",
                     (bot_name, origin, key),
                 ) as cur:
-                    task_id = (await cur.fetchone())[0]
+                    existing = await cur.fetchone()
+                if existing is None:
+                    raise DelegationBusyError(active_task_id)
+                task_id = existing[0]
             elif (
                 not str(task_id).isascii()
                 or not str(task_id).isdigit()
@@ -167,6 +186,8 @@ class DelegationManager:
                         status,
                     )
                     return task_id, status in ("running", "ready", "delivering")
+            if active_task_id is not None and active_task_id != task_id:
+                raise DelegationBusyError(active_task_id)
             await conn.execute(
                 "UPDATE delegated_tasks SET revision=revision+1,remaining=?,status='running' WHERE id=?",
                 (budget, task_id),
@@ -183,6 +204,7 @@ class DelegationManager:
         worker_scope = deepcopy(scope)
         # Repeated side-effecting native tools share one trusted task request identity.
         worker_scope["request_id"] = f"delegation_{task_id}"
+        # Publish the route before yielding so the next serialized submit sees it.
         self.routes[task_id] = (bot_name, event, worker_scope)
         if task_id in self.workers:
             self.rescheduled.add(task_id)

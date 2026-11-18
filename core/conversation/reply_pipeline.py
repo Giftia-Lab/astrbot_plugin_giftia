@@ -880,11 +880,24 @@ class ReplyPipeline:
             tool_results = []
 
         # Dispatcher 已经在对应输出顺序位置执行了 XML 工具。
-        tool_results.extend(llm_result.xml_tool_results)
+        turn_receipts = [
+            receipt
+            for receipt in llm_result.xml_tool_results
+            if not receipt.get("delegation_busy")
+        ]
+        # Give capacity feedback once when the turn only returned busy receipts.
+        if (
+            not turn_receipts
+            and llm_result.xml_tool_results
+            and times + 1 < max_loop
+            and not any(receipt.get("delegation_busy") for receipt in tool_results)
+        ):
+            turn_receipts = llm_result.xml_tool_results[:1]
+        tool_results.extend(turn_receipts)
 
         # 10. 判断是否需要继续循环迭代
         if (llm_result.tools_to_call and not llm_result.xml_tool_results) or any(
-            "delegated" not in receipt for receipt in llm_result.xml_tool_results
+            "delegated" not in receipt for receipt in turn_receipts
         ):
             logger.debug(f"{bot_name} llm step {times + 1} ...")
             async for chunk in self.dispatch_llm_reply_loop(

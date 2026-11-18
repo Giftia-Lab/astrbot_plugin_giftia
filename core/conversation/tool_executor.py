@@ -22,6 +22,15 @@ from ..llm.native_tools import NATIVE_CONTEXT_KEY
 from ..utils.schemas import MessageData
 
 
+class DelegationBusyError(ValueError):
+    """The conversation already has an active delegation."""
+
+    def __init__(self, task_id: int):
+        super().__init__(
+            f"当前会话已有活跃子任务 #{task_id}。请等待其完成，或使用该 task_id 补充要求。"
+        )
+
+
 class ToolExecutor:
     def __init__(self, plugin):
         self.plugin = plugin
@@ -79,6 +88,8 @@ class ToolExecutor:
             result.append(
                 f"已受理子任务 {delegated}" if waiting else f"子任务 {delegated} 已结束"
             )
+        except DelegationBusyError as exc:
+            return {"name": "sub_agent", "results": str(exc), "delegation_busy": True}
         except asyncio.CancelledError as exc:
             interrupted = exc
         except Exception as e:

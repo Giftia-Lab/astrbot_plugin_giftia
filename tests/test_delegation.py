@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 from core.conversation.chat_manager import ChatManager, QueuedMessage, SessionState
 from core.conversation.delegation import DelegationManager
-from core.conversation.tool_executor import FunctionToolExecutor
+from core.conversation.tool_executor import DelegationBusyError, FunctionToolExecutor
 from core.database.data_cache import DataCache
 from core.database.database import Database
 from core.llm.call_llm import CallLLM
@@ -330,6 +330,108 @@ async def test_xml_tools_always_keep_same_turn_results_and_log_call_only(rt, fai
 
 
 @pytest.mark.asyncio
+async def test_reply_admits_only_one_delegation_and_limits_busy_feedback(rt):
+    p, event = rt.p, rt.e
+    original = MessageData(
+        message_id="a",
+        user_id="alice",
+        nickname="Alice",
+        group_or_user_id="7",
+        content="查版本",
+        time=datetime.now().isoformat(),
+    )
+    await p.data_cache.add_message("bot", "7", original)
+    state = SessionState(current=[QueuedMessage(event, original, True, 0, 3)])
+    batch = "".join(f"<sub_agent>查第 {i} 个版本</sub_agent>" for i in range(100))
+    busy_batch = "".join(
+        f"<sub_agent>另查第 {i} 个版本</sub_agent>" for i in range(100)
+    )
+    p.context.tool_loop_agent.side_effect = [
+        LLMResponse("assistant", batch),
+        LLMResponse("assistant", busy_batch),
+        LLMResponse("assistant", busy_batch),
+        LLMResponse("assistant", "<message>已核对版本。</message>"),
+    ]
+    p.context.llm_generate.return_value = LLMResponse(
+        "assistant", "<report>支持版本 4。</report>"
+    )
+    p.aiocqhttp.send_message.return_value = (True, "final")
+
+    async with session_lock_manager.acquire_lock(event.unified_msg_origin):
+        assert await p.chat_manager._reply_batch(
+            event, "bot", "7", state, [original], None, [], None
+        )
+        assert state.waiting_agent and p.context.tool_loop_agent.await_count == 1
+        ((task_id, worker),) = rt.d.workers.items()
+
+        assert await p.chat_manager._reply_batch(
+            event, "bot", "7", state, [original], None, [], None
+        )
+        assert p.context.tool_loop_agent.await_count == 3
+        prompt = p.context.tool_loop_agent.await_args.kwargs["prompt"]
+        assert prompt.count(f"当前会话已有活跃子任务 #{task_id}") == 1
+    await asyncio.wait_for(worker, 3)
+
+    p.context.llm_generate.assert_awaited_once()
+    assert p.context.tool_loop_agent.await_count == 4
+    async with rt.db.query("SELECT instruction,status FROM delegated_tasks") as cur:
+        assert [tuple(row) for row in await cur.fetchall()] == [
+            ("查第 0 个版本", "delivered")
+        ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submissions_use_one_slot_per_conversation(rt):
+    release = asyncio.Event()
+
+    async def worker_reply(**kwargs):
+        await release.wait()
+        return LLMResponse("assistant", "<report>完成。</report>")
+
+    rt.p.context.llm_generate.side_effect = worker_reply
+    rt.p.chat_manager.deliver_delegation = AsyncMock(return_value=True)
+
+    requests = [{"instruction": text} for text in ("first", "second")]
+    outcomes = await asyncio.gather(
+        *(rt.d.submit(rt.e, "bot", request, rt.scope) for request in requests),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(outcome, DelegationBusyError) for outcome in outcomes) == 1
+    (accepted,) = (
+        index for index, outcome in enumerate(outcomes) if isinstance(outcome, tuple)
+    )
+    first_id, waiting = outcomes[accepted]
+    assert waiting
+
+    other = MagicMock(spec=AiocqhttpMessageEvent)
+    other.platform_meta = rt.e.platform_meta
+    other.unified_msg_origin = "qq:GroupMessage:8"
+    other.get_group_id.return_value = "8"
+    other.get_sender_id.return_value = "alice"
+    other_id, waiting = await rt.d.submit(
+        other, "bot", requests[accepted], {**rt.scope, "session_id": "8"}
+    )
+    assert waiting and set(rt.d.workers) == {first_id, other_id}
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*rt.d.workers.values()), 3)
+
+    release.clear()
+    next_id, waiting = await rt.d.submit(rt.e, "bot", requests[1 - accepted], rt.scope)
+    assert waiting and next_id != first_id
+    assert await rt.d.submit(rt.e, "bot", requests[accepted], rt.scope) == (
+        first_id,
+        False,
+    )
+    followup = {"task_id": first_id, "instruction": "follow up on the old task"}
+    with pytest.raises(DelegationBusyError, match=rf"#{next_id}\b"):
+        await rt.d.submit(rt.e, "bot", followup, rt.scope)
+    release.set()
+    await asyncio.wait_for(rt.d.workers[next_id], 3)
+    assert await rt.d.submit(rt.e, "bot", followup, rt.scope) == (first_id, True)
+    await asyncio.wait_for(rt.d.workers[first_id], 3)
+
+
+@pytest.mark.asyncio
 async def test_followup_while_completed_wakeup_is_blocked_by_parent_lock(
     rt, monkeypatch
 ):
@@ -374,6 +476,8 @@ async def test_followup_while_completed_wakeup_is_blocked_by_parent_lock(
         release_worker.set()
         await asyncio.wait_for(queued.wait(), 3)
         assert "ready" in await rt.d.context("bot", rt.e.unified_msg_origin)
+        with pytest.raises(DelegationBusyError):
+            await rt.d.submit(rt.e, "bot", {"instruction": "另查版本"}, followup)
         return LLMResponse(
             "assistant",
             f'<sub_agent task_id="{tid}">也查 Windows</sub_agent>',
