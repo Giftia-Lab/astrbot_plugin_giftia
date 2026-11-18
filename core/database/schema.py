@@ -46,6 +46,7 @@ TABLE_DEFINITIONS = (
         is_recalled INTEGER,
         processing_status TEXT DEFAULT 'history',
         memory_status TEXT NOT NULL DEFAULT 'unseen',
+        pinned_thought TEXT,
         created_at DATETIME,
         updated_at DATETIME
     )
@@ -101,6 +102,7 @@ TABLE_DEFINITIONS = (
         mood TEXT,
         state TEXT,
         memory TEXT,
+        memory_pinned INTEGER NOT NULL DEFAULT 0,
         action TEXT,
         energy TEXT,
         custom_status TEXT,

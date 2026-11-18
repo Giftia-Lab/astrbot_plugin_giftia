@@ -1,4 +1,4 @@
-"""Verify task attribution across batch replies and tool correction turns."""
+"""Verify conversational memos and session context across tool turns."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -48,15 +48,10 @@ def runtime():
             is_bot_muted=Mock(return_value=False),
             add_message=AsyncMock(side_effect=add_message),
         ),
-        task_board=SimpleNamespace(
-            get_active_tasks=AsyncMock(return_value=[]),
-            max_active_tasks=lambda: 3,
-            create_task=AsyncMock(
-                return_value=(True, "created", SimpleNamespace(task_id="task"))
-            ),
-            close_task=AsyncMock(
-                return_value=(True, "closed", SimpleNamespace(task_id="task"))
-            ),
+        memos=SimpleNamespace(
+            list_active=AsyncMock(return_value=[]),
+            limit=3,
+            apply=AsyncMock(return_value="memo42"),
         ),
         task_manager=SimpleNamespace(
             add_job=Mock(return_value="created"),
@@ -117,99 +112,54 @@ def runtime():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tag", ["task_board", "short_task"])
 @pytest.mark.parametrize("platform", ["aiocqhttp", "generic"])
-async def test_short_task_creator_comes_from_each_request(runtime, tag, platform):
+async def test_model_manages_its_own_memos_without_creator(runtime, platform):
     runtime.event.get_platform_name.return_value = platform
     await runtime.run(
-        f'<{tag} action="create" user_id="alice" creator_nickname="Wrong">For Bob</{tag}>'
-        f'<{tag} action="create" user_id="bob">For Alice</{tag}>'
+        '<memo action="add" duration="2d">A plan</memo>'
+        '<memo action="renew" id="memo42" duration="30min"/>'
+        '<memo action="delete" id="memo42"/>'
     )
-    calls = runtime.plugin.task_board.create_task.await_args_list
-    assert [
-        (c.kwargs["creator_user_id"], c.kwargs["creator_nickname"]) for c in calls
-    ] == [("alice", "Alice"), ("bob", "Bob")]
+    calls = runtime.plugin.memos.apply.await_args_list
+    assert [c.kwargs["action"] for c in calls] == ["add", "renew", "delete"]
+    assert all(c.args == ("bot", "group") for c in calls)
+    assert calls[0].kwargs["content"] == "A plan"
+    assert calls[1].kwargs["memo_id"] == "memo42"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("creator", ["", "unknown", "recalled", "operation", "late"])
-async def test_invalid_creator_returns_feedback_then_allows_correction(
-    runtime, creator
+async def test_failed_memo_can_be_corrected_without_replaying_completed_actions(
+    runtime,
 ):
-    runtime.history.extend(
-        [
-            MessageData(user_id="recalled", is_recalled=1),
-            MessageData(user_id="operation", role="operation_log"),
-        ]
-    )
     frozen = list(runtime.history)
     runtime.history.append(MessageData(user_id="late", nickname="Late"))
-    creator_attr = f'user_id="{creator}"' if creator else ""
+    runtime.plugin.memos.apply.side_effect = ["first", ValueError("时长错误"), "second"]
     chunks = await runtime.run(
-        f'<task_board action="create" {creator_attr}>For Bob</task_board>',
-        '<task_board action="create" user_id="alice">For Bob</task_board>',
+        '<memo action="add" duration="1h">First</memo><memo action="add" duration="bad">Second</memo>',
+        '<memo action="add" duration="2h">Second</memo>',
         recent_messages=frozen,
-        reply_messages=frozen[:2],
-    )
-    calls = runtime.plugin.task_board.create_task.await_args_list
-    assert len(calls) == 1
-    assert len(chunks) == 2
-    error = chunks[0].xml_tool_results[0]["results"]
-    assert "user_id" in error and "failed" in error
-    assert (
-        "user_id"
-        in runtime.plugin.call_llm.call_llm_reply.await_args_list[1].kwargs[
-            "user_prompt"
-        ]
-    )
-    assert "late" not in chunks[1].task_creator_names
-    first, second = runtime.plugin.call_llm.call_llm_reply.await_args_list
-    first_context, second_context = (
-        first.kwargs["tool_context"],
-        second.kwargs["tool_context"],
-    )
-    assert first_context is second_context and first_context["request_id"]
-    assert first_context["bot_name"] == "bot" and first_context["session_id"] == "group"
-    assert first_context["user_ids"] == ["alice", "bob"]
-    assert not {"late", "recalled", "operation"} & first_context["creator_names"].keys()
-    assert (
-        runtime.plugin.data_cache.add_message.await_args_list[0].args[2].role
-        == "operation_log"
-    )
-
-
-@pytest.mark.asyncio
-async def test_correction_does_not_replay_successful_task_board_action(runtime):
-    await runtime.run(
-        '<task_board action="create" user_id="alice">First</task_board>'
-        '<task_board action="create">Second</task_board>',
-        '<task_board action="create" user_id="bob">Second</task_board>',
+        reply_messages=frozen,
     )
     assert [
-        call.kwargs["creator_user_id"]
-        for call in runtime.plugin.task_board.create_task.await_args_list
-    ] == ["alice", "bob"]
+        c.kwargs["content"] for c in runtime.plugin.memos.apply.await_args_list
+    ] == ["First", "Second", "Second"]
+    assert len(chunks) == 2
+    assert "时长错误" in chunks[0].xml_tool_results[0]["results"]
+    first, second = runtime.plugin.call_llm.call_llm_reply.await_args_list
+    assert "时长错误" in second.kwargs["user_prompt"]
+    context = first.kwargs["tool_context"]
+    assert context is second.kwargs["tool_context"] and context["request_id"]
+    assert context["user_ids"] == ["alice", "bob"]
+    assert "late" not in context["creator_names"]
 
 
-@pytest.mark.asyncio
-async def test_reminder_creator_survives_history_expiry(runtime):
-    runtime.history.clear()
-    await runtime.run(
-        '<task_board action="create" user_id="alice">Follow-up</task_board>',
-        remind_message="Alice(alice): Follow-up",
-        task_creator_names={"alice": "Alice"},
-    )
-    job = runtime.plugin.task_board.create_task.await_args.kwargs
-    assert (job["creator_user_id"], job["creator_nickname"]) == ("alice", "Alice")
-
-
-def test_task_instructions_describe_creator_parameter():
+def test_xml_instructions_show_optional_pin_and_memo_operations():
     prompt = build_xml_instructions(enabled_features=None)
-    assert "<schedule_task" not in prompt
-    assert "<all_task" not in prompt
-    assert "<delete_task" not in prompt
-    assert '<task_board action="create" user_id="创建者ID"' in prompt
-    assert "user_id 为任务创建者的用户 ID，必填。" in prompt
+    assert '<status pin="true">' in prompt and "数字是 4" in prompt
+    for action in ("add", "renew", "delete"):
+        assert f'<memo action="{action}"' in prompt
+    assert "<task_board" not in prompt
+    assert '<memo action="add"' not in build_xml_instructions(enabled_features=[])
 
 
 def test_scheduled_query_displays_stored_creator_without_modifying_legacy_job():

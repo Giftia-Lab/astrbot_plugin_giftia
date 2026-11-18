@@ -553,6 +553,25 @@ async def _migrate_to_v7(conn: aiosqlite.Connection) -> None:
         )
 
 
+async def _migrate_to_v8(conn: aiosqlite.Connection) -> None:
+    """Attach optional private thought snapshots to their original history rows.
+
+    Args:
+        conn: Database connection being initialized.
+    """
+    # The original memo branch also used v7, without the model usage columns.
+    await _migrate_to_v7(conn)
+    await _add_missing_columns(conn, "chat_history", (("pinned_thought", "TEXT"),))
+    await _add_missing_columns(
+        conn, "bot_status", (("memory_pinned", "INTEGER NOT NULL DEFAULT 0"),)
+    )
+    # Older manually inserted tasks may lack a deadline.
+    await conn.execute(
+        """UPDATE short_tasks SET expires_at=datetime('now', '+1 day', 'localtime')
+           WHERE status='active' AND NULLIF(expires_at, '') IS NULL"""
+    )
+
+
 # Schema versions are independent of plugin releases; released steps stay frozen.
 MIGRATIONS = (
     (1, _migrate_legacy_to_v1),
@@ -562,6 +581,7 @@ MIGRATIONS = (
     (5, _migrate_to_v5),
     (6, _migrate_to_v6),
     (7, _migrate_to_v7),
+    (8, _migrate_to_v8),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

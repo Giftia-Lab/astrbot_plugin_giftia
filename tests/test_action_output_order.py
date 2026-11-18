@@ -42,6 +42,7 @@ def runtime(monkeypatch):
         data_cache=SimpleNamespace(
             is_bot_muted=Mock(return_value=False),
             add_message=AsyncMock(),
+            pin_thought=AsyncMock(return_value=True),
             recent_messages={
                 "bot:100": [MessageData(message_id="400", user_id="other")]
             },
@@ -74,6 +75,52 @@ def runtime(monkeypatch):
         calls=calls,
         sleep=sleep,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["aiocqhttp", "qq_official", "generic"])
+async def test_split_reply_provides_only_its_last_delivered_anchor(runtime, platform):
+    runtime.event.get_platform_name.return_value = platform
+    result = await runtime.parser.decode_llm_xml(
+        '<status pin="true">思考: 我想的是4</status><message>我想好了</message><message>你猜</message>',
+        "100",
+    )
+    await runtime.dispatcher.dispatch_actions(
+        runtime.event, "bot", "Bot", "100", result
+    )
+    messages = [
+        c.args[2]
+        for c in runtime.plugin.data_cache.add_message.await_args_list
+        if c.args[2].role == "message"
+    ]
+    assert len(messages) == 2 and result.thought_anchor is messages[-1]
+    runtime.plugin.data_cache.pin_thought.assert_awaited_once_with(
+        "bot", "100", messages[-1].message_id, "我想的是4"
+    )
+    assert all("我想的是4" not in m.content for m in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_sent", [True, False])
+async def test_pin_follows_only_delivered_segments_on_failure(runtime, first_sent):
+    result = await runtime.parser.decode_llm_xml(
+        '<status pin="true">思考: secret</status><message>One</message><message>Two</message>',
+        "100",
+    )
+    result.thought_anchor = MessageData(message_id="input")
+    runtime.plugin.aiocqhttp.send_message.side_effect = [
+        (first_sent, "one"),
+        (False, None),
+    ]
+    with pytest.raises(RuntimeError, match="failed to deliver"):
+        await runtime.dispatcher.dispatch_actions(
+            runtime.event, "bot", "Bot", "100", result
+        )
+    writer = runtime.plugin.data_cache.pin_thought
+    if first_sent:
+        writer.assert_awaited_once_with("bot", "100", "one", "secret")
+    else:
+        writer.assert_not_awaited()
 
 
 @pytest.mark.asyncio

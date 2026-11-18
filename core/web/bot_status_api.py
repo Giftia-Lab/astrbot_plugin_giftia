@@ -24,16 +24,10 @@ class BotStatusApi:
                 rows = await cursor.fetchall()
 
             for r in rows:
-                task_board = {
-                    "enabled": False,
-                    "limit": 0,
-                    "active_tasks": [],
-                    "stats": {},
-                }
-                if hasattr(self.giftia, "task_board"):
-                    task_board = await self.giftia.task_board.get_dashboard_summary(
-                        bot_name=r["bot_name"],
-                        group_or_user_id=r["group_or_user_id"],
+                memos = {"enabled": False, "limit": 0, "items": []}
+                if hasattr(self.giftia, "memos"):
+                    memos = await self.giftia.memos.dashboard(
+                        r["bot_name"], r["group_or_user_id"]
                     )
 
                 custom_status = parse_custom_status_json(
@@ -53,7 +47,7 @@ class BotStatusApi:
                         "custom_status": custom_status,
                         "created_at": r["created_at"],
                         "updated_at": r["updated_at"],
-                        "task_board": task_board,
+                        "memos": memos,
                     }
                 )
 
@@ -113,7 +107,8 @@ class BotStatusApi:
                 status.mood = mood
             if state is not None:
                 status.state = state
-            if memory is not None:
+            if memory is not None and memory != status.memory:
+                status.memory_pinned = False
                 status.memory = memory
             if action is not None:
                 status.action = action

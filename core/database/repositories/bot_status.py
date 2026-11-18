@@ -28,7 +28,7 @@ class BotStatusRepository(BaseRepository):
     async def get_bot_status(self, group_or_user_id: str, bot_name: str) -> Status:
         async with self.conn.execute(
             """
-            SELECT mood, state, memory, action, energy, custom_status, updated_at FROM bot_status WHERE group_or_user_id = ? AND bot_name = ?
+            SELECT mood, state, memory, memory_pinned, action, energy, custom_status, updated_at FROM bot_status WHERE group_or_user_id = ? AND bot_name = ?
             """,
             (group_or_user_id, bot_name),
         ) as cursor:
@@ -50,6 +50,7 @@ class BotStatusRepository(BaseRepository):
                 mood=row["mood"],
                 state=row["state"],
                 memory=row["memory"],
+                memory_pinned=bool(row["memory_pinned"]),
                 action=row["action"],
                 energy=row["energy"],
                 timestamp=ts,
@@ -82,12 +83,13 @@ class BotStatusRepository(BaseRepository):
         )
         await self.conn.execute(
             """
-            INSERT INTO bot_status (group_or_user_id, bot_name, mood, state, memory, action, energy, custom_status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO bot_status (group_or_user_id, bot_name, mood, state, memory, memory_pinned, action, energy, custom_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(group_or_user_id, bot_name) DO UPDATE SET
                 mood=excluded.mood,
                 state=excluded.state,
                 memory=excluded.memory,
+                memory_pinned=excluded.memory_pinned,
                 action=excluded.action,
                 energy=excluded.energy,
                 custom_status=excluded.custom_status,
@@ -99,6 +101,7 @@ class BotStatusRepository(BaseRepository):
                 status.mood,
                 status.state,
                 status.memory,
+                int(status.memory_pinned),
                 status.action,
                 status.energy,
                 custom_status_str,

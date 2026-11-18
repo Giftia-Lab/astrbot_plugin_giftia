@@ -111,6 +111,9 @@ class XmlParse:
                 tag_name = child.name
 
                 if tag_name == "status":
+                    result.status.memory_pinned = (
+                        self._attr_str(child, "pin", "").strip().lower() == "true"
+                    )
                     raw_text = child.get_text(strip=True)
                     parsed_data = dict(re.findall(r"(\w+)[:：]\s*([^\n]+)", raw_text))
                     result.status.mood = (
@@ -458,32 +461,17 @@ class XmlParse:
                         )
                         raise ValueError(f"Malformed tool call in XML: {text}")
 
-                elif tag_name in ("task_board", "short_task"):
-                    action = self._attr_str(child, "action", "").lower().strip()
-                    task_id = self._attr_str(child, "task_id", "")
-                    expires_at = self._attr_str(child, "expires_at", "")
-                    text = child.get_text(strip=True)
-                    if action == "create" and text:
-                        result.task_board_actions.append(
-                            {
-                                "action": "create",
-                                "content": text,
-                                "expires_at": expires_at,
-                                "user_id": self._attr_str(child, "user_id", ""),
-                            }
-                        )
-                    elif action in ("complete", "cancel") and task_id:
-                        result.task_board_actions.append(
-                            {
-                                "action": action,
-                                "task_id": task_id,
-                                "reason": text,
-                            }
-                        )
-                    else:
-                        logger.error(
-                            f"Task board数据不完整: {child.attrs}, xml_str: {xml_str[:1000]}"
-                        )
+                elif tag_name == "memo":
+                    result.memo_actions.append(
+                        {
+                            "action": self._attr_str(child, "action", "")
+                            .strip()
+                            .lower(),
+                            "memo_id": self._attr_str(child, "id", "").strip(),
+                            "duration": self._attr_str(child, "duration", "").strip(),
+                            "content": child.get_text(strip=True),
+                        }
+                    )
 
                 elif tag_name == "add_sticker":
                     media_id = self._attr_str(child, "media_id", "")

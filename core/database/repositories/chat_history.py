@@ -66,6 +66,9 @@ def _row_to_message(row: aiosqlite.Row) -> MessageData:
         is_recalled=row["is_recalled"],
         media_id_list=_decode_json_list(row["media_ids"]),
         forward_messages=[],
+        pinned_thought=(row["pinned_thought"] or "")
+        if _row_has(row, "pinned_thought")
+        else "",
         role=row["role"] if _row_has(row, "role") and row["role"] else "message",
     )
 
@@ -189,7 +192,7 @@ class ChatHistoryRepository(BaseRepository):
         async with self.conn.execute(
             """
             SELECT * FROM (
-                SELECT nickname, user_id, message_id, content, media_ids, is_recalled, role, created_at
+                SELECT pinned_thought, nickname, user_id, message_id, content, media_ids, is_recalled, role, created_at
                 FROM chat_history
                 WHERE group_or_user_id = ? AND bot_name = ?
                 ORDER BY created_at DESC
@@ -202,6 +205,30 @@ class ChatHistoryRepository(BaseRepository):
             rows = await cursor.fetchall()
         messages = [_row_to_message(row) for row in rows]
         return await self._attach_forward_messages(bot_name, group_or_user_id, messages)
+
+    @serialized_operation
+    async def pin_thought(
+        self, bot_name: str, session_id: str, message_id: str, thought: str
+    ) -> bool:
+        """Attach a snapshot without changing speech, timestamps or memory status.
+
+        Args:
+            bot_name: Owning bot configuration.
+            session_id: Owning conversation.
+            message_id: Verified source message.
+            thought: Text from this accepted turn.
+
+        Returns:
+            Whether the source message still exists.
+        """
+        cursor = await self.conn.execute(
+            """UPDATE chat_history SET pinned_thought=?
+               WHERE bot_name=? AND group_or_user_id=? AND message_id=?
+                 AND COALESCE(is_recalled, 0)=0 AND COALESCE(role,'message')='message'""",
+            (thought, bot_name, session_id, message_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
 
     @serialized_operation
     async def get_max_message_id(self, bot_name: str, group_or_user_id: str) -> int:

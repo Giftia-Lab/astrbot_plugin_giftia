@@ -29,7 +29,7 @@ class FeatureKey:
     DELETE = "delete"
     BLOCK_USER = "block_user"
     GROUP_ADMIN = "group_admin"
-    TASK_BOARD = "task_board"
+    MEMO = "memo"
     SLANG = "slang"
     STICKER = "sticker"
     SET_CALL_NAME = "set_call_name"
@@ -95,6 +95,7 @@ class MessageData:
     media_id_list: list[str] = field(default_factory=list)  # 这里只存储媒体ID
     forward_messages: list[dict] = field(default_factory=list)
     role: str = "message"  # "message" or "operation_log"
+    pinned_thought: str = ""
 
 
 @dataclass(repr=False, slots=True)
@@ -125,6 +126,7 @@ class Status:
     timestamp: float = 0.0
     last_updated: float = 0.0
     custom_status: dict[str, str] = field(default_factory=dict)
+    memory_pinned: bool = False
 
 
 @dataclass(repr=False, slots=True)
@@ -173,19 +175,22 @@ class Sticker:
 
 
 @dataclass(repr=False, slots=True)
-class ShortTask:
-    task_id: str
-    bot_name: str
-    group_or_user_id: str
-    creator_user_id: str
-    creator_nickname: str
+class Memo:
+    memo_id: str
     content: str
-    status: str = "active"
-    closed_by_user_id: str = ""
-    close_reason: str = ""
-    expires_at: str = ""
-    created_at: str = ""
-    updated_at: str = ""
+    created_at: str
+    remaining_seconds: int
+
+    @property
+    def remaining(self) -> str:
+        """Format the remaining duration at the time the memo was read."""
+        if self.remaining_seconds >= 86400:
+            return f"{self.remaining_seconds // 86400} 天"
+        if self.remaining_seconds >= 3600:
+            return f"{self.remaining_seconds // 3600} h"
+        if self.remaining_seconds >= 60:
+            return f"{self.remaining_seconds // 60} min"
+        return "不足 1 min"
 
 
 @dataclass(repr=False, slots=True)
@@ -219,8 +224,7 @@ FLAT_CLOSABLE_TAGS = [
     "summary_user_profile",
     "update_relation",
     "tool_call",
-    "task_board",
-    "short_task",
+    "memo",
     "add_sticker",
     "tts",
     "decision",
@@ -292,8 +296,8 @@ class XmlLlmResult:
     add_stickers: list[str] = field(default_factory=list)
     # 发送表情包，表情ID
     send_stickers: list[str] = field(default_factory=list)
-    # 短期任务看板操作
-    task_board_actions: list[dict] = field(default_factory=list)
+    # Session memo operations.
+    memo_actions: list[dict] = field(default_factory=list)
     slang_actions: list[dict] = field(default_factory=list)
     # TTS 语音输出
     tts_segments: list[TTSRequest] = field(default_factory=list)
@@ -306,3 +310,5 @@ class XmlLlmResult:
     output_order: list[tuple[str, int]] = field(default_factory=list)
     # Append new fields to preserve existing positional constructor arguments.
     user_block_actions: list[tuple[str, str]] = field(default_factory=list)
+    # Trusted frozen input for silence, or the last successfully recorded output.
+    thought_anchor: MessageData | None = None

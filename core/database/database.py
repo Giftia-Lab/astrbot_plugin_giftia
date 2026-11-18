@@ -13,7 +13,6 @@ from ..utils.schemas import (
     MediaCaption,
     MemoryItem,
     MessageData,
-    ShortTask,
     Status,
     Sticker,
 )
@@ -25,7 +24,7 @@ from .repositories.forwarded_messages import ForwardedMessagesRepository
 from .repositories.kv_store import KVStoreRepository
 from .repositories.media_captions import MediaCaptionsRepository
 from .repositories.memories import MemoriesRepository
-from .repositories.short_tasks import ShortTasksRepository
+from .repositories.memos import MemosRepository
 from .repositories.slang import SlangRepository
 from .repositories.stickers import StickersRepository
 from .repositories.token_usage import TokenUsageRepository
@@ -53,7 +52,7 @@ class Database(ProfileStoreMixin):
             conn, self.chat_history_repo
         )
         self.media_captions_repo = MediaCaptionsRepository(conn)
-        self.short_tasks_repo = ShortTasksRepository(conn)
+        self.memos_repo = MemosRepository(conn)
         self.slang_repo = SlangRepository(conn)
         self.bot_status_repo = BotStatusRepository(conn)
         self.memories_repo = MemoriesRepository(conn)
@@ -339,108 +338,6 @@ class Database(ProfileStoreMixin):
 
     async def clear_media_caption(self):
         return await self.media_captions_repo.clear_media_caption()
-
-    # =========================================================================
-    # Short Tasks Delegations
-    # =========================================================================
-    async def insert_short_task(self, task: ShortTask) -> None:
-        return await self.short_tasks_repo.insert_short_task(task)
-
-    async def insert_short_task_if_capacity(
-        self, task: ShortTask, max_active_tasks: int
-    ) -> bool:
-        return await self.short_tasks_repo.insert_short_task_if_capacity(
-            task, max_active_tasks
-        )
-
-    async def expire_short_tasks(
-        self, bot_name: str | None = None, group_or_user_id: str | None = None
-    ) -> int:
-        return await self.short_tasks_repo.expire_short_tasks(
-            bot_name, group_or_user_id
-        )
-
-    async def get_short_tasks(
-        self,
-        bot_name: str,
-        group_or_user_id: str,
-        statuses: list[str] | None = None,
-        limit: int | None = None,
-    ) -> list[ShortTask]:
-        return await self.short_tasks_repo.get_short_tasks(
-            bot_name, group_or_user_id, statuses, limit
-        )
-
-    async def get_short_task(
-        self, task_id: str, bot_name: str, group_or_user_id: str
-    ) -> ShortTask | None:
-        return await self.short_tasks_repo.get_short_task(
-            task_id, bot_name, group_or_user_id
-        )
-
-    async def count_active_short_tasks(
-        self, bot_name: str, group_or_user_id: str
-    ) -> int:
-        return await self.short_tasks_repo.count_active_short_tasks(
-            bot_name, group_or_user_id
-        )
-
-    async def update_short_task_status(
-        self,
-        task_id: str,
-        bot_name: str,
-        group_or_user_id: str,
-        status: str,
-        closed_by_user_id: str = "",
-        close_reason: str = "",
-    ) -> bool:
-        return await self.short_tasks_repo.update_short_task_status(
-            task_id, bot_name, group_or_user_id, status, closed_by_user_id, close_reason
-        )
-
-    async def update_short_task(
-        self,
-        task_id: str,
-        bot_name: str,
-        group_or_user_id: str,
-        content: str,
-        status: str,
-        expires_at: str,
-        closed_by_user_id: str = "",
-        close_reason: str = "",
-    ) -> bool:
-        return await self.short_tasks_repo.update_short_task(
-            task_id,
-            bot_name,
-            group_or_user_id,
-            content,
-            status,
-            expires_at,
-            closed_by_user_id,
-            close_reason,
-        )
-
-    async def delete_short_task(
-        self, task_id: str, bot_name: str, group_or_user_id: str
-    ) -> bool:
-        return await self.short_tasks_repo.delete_short_task(
-            task_id, bot_name, group_or_user_id
-        )
-
-    async def clear_short_tasks(
-        self,
-        bot_name: str,
-        group_or_user_id: str,
-        statuses: list[str] | None = None,
-    ) -> int:
-        return await self.short_tasks_repo.clear_short_tasks(
-            bot_name, group_or_user_id, statuses
-        )
-
-    async def get_short_task_stats(self, bot_name: str, group_or_user_id: str) -> dict:
-        return await self.short_tasks_repo.get_short_task_stats(
-            bot_name, group_or_user_id
-        )
 
     # =========================================================================
     # Bot Status Delegations

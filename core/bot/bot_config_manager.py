@@ -27,7 +27,7 @@ INTERACTIVE_FEATURES_METADATA = [
         "note": "",
     },
     {"key": FeatureKey.GROUP_ADMIN, "label": "群管禁言/踢人", "note": "踢人仅OneBot"},
-    {"key": FeatureKey.TASK_BOARD, "label": "短期任务看板", "note": ""},
+    {"key": FeatureKey.MEMO, "label": "会话备忘录", "note": ""},
     {
         "key": FeatureKey.SLANG,
         "label": "黑话管理",
@@ -434,6 +434,8 @@ class BotConfigManager:
                     continue
                 s = str(f).strip()
                 key = s.split("(")[0].strip() if "(" in s else s
+                if key == "task_board":
+                    key = FeatureKey.MEMO
                 if key in ("memory_query", "memory_query_delete", "schedule_task"):
                     continue
                 if key and key not in normalized_features:

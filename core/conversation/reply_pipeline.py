@@ -55,7 +55,7 @@ class ReplyPipeline:
             "native_tools_called",
             "add_stickers",
             "send_stickers",
-            "task_board_actions",
+            "memo_actions",
             "slang_actions",
             "tts_segments",
             "set_call_names",
@@ -511,24 +511,16 @@ class ReplyPipeline:
             self_id=event.get_self_id(),
             limit=self.plugin.tools_config.get("active_user_brief_limit", 10),
         )
-        short_tasks = []
-        short_task_limit = self.plugin.tools_config.get("task_board_max_active", 3)
-        if hasattr(self.plugin, "task_board"):
-            short_tasks = await self.plugin.task_board.get_active_tasks(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-            )
-            short_task_limit = self.plugin.task_board.max_active_tasks()
+        memos = []
+        memo_limit = 0
+        if hasattr(self.plugin, "memos"):
+            memos = await self.plugin.memos.list_active(bot_name, group_or_user_id)
+            memo_limit = self.plugin.memos.limit
 
         if is_first_turn:
             # Freeze trusted creator identities with the input, including the
             # original owners of reminders whose messages have left history.
             task_creator_names = dict(task_creator_names or {})
-            for task in short_tasks:
-                if task.creator_user_id:
-                    task_creator_names[str(task.creator_user_id)] = (
-                        task.creator_nickname or str(task.creator_user_id)
-                    )
             for msg in [*recent_messages, *reply_messages]:
                 if msg.user_id and not msg.is_recalled and msg.role == "message":
                     task_creator_names[str(msg.user_id)] = (
@@ -623,8 +615,8 @@ class ReplyPipeline:
             user_profiles=user_profiles,
             group_profile=group_profile,
             active_user_briefs=active_user_briefs,
-            short_tasks=short_tasks,
-            short_task_limit=short_task_limit,
+            memos=memos,
+            memo_limit=memo_limit,
             other_data=other_data,
             bot_sticker=bot_sticker_cache,
             message_truncate_limit=getattr(
@@ -847,6 +839,8 @@ class ReplyPipeline:
         }
         llm_result.task_creator_names = dict(task_creator_names)
         llm_result.tool_context = tool_context
+        if reply_messages and llm_result.status and llm_result.status.memory_pinned:
+            llm_result.thought_anchor = reply_messages[-1]
         yield llm_result
 
         # 初始化参数用于潜在的下一次递归

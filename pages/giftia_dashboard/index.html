@@ -931,19 +931,19 @@
     <div id="task-board-modal" class="modal-overlay">
         <div class="modal-card card task-board-modal-card">
             <div class="modal-header">
-                <h2 id="task-board-title">会话任务看板</h2>
+                <h2 id="task-board-title">会话备忘录</h2>
                 <button class="modal-close-btn" onclick="closeModal('task-board-modal')">&times;</button>
             </div>
 
             <!-- Main Mode Switch -->
             <div class="task-board-main-nav">
-                <button class="task-board-main-tab active" data-main-tab="short" onclick="window.setTaskBoardMainTab('short')">
+                <button class="task-board-main-tab active" data-main-tab="memo" onclick="window.setTaskBoardMainTab('memo')">
                     <svg class="tab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
-                    短期任务看板
+                    备忘录
                 </button>
                 <button class="task-board-main-tab" data-main-tab="scheduled" onclick="window.setTaskBoardMainTab('scheduled')">
                     <svg class="tab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                    定时任务看板
+                    定时任务
                 </button>
             </div>
 
@@ -951,31 +951,9 @@
                 <input type="hidden" id="task-board-bot">
                 <input type="hidden" id="task-board-group">
 
-                <!-- Short Task Panel -->
-                <div id="short-task-board-panel" class="task-board-panel active">
-                    <div class="task-board-tabs-wrapper">
-                        <div class="task-board-tabs">
-                            <button class="task-board-tab active" data-tab="active" onclick="window.setTaskBoardTab('active')">
-                                <svg class="tab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>
-                                <span class="task-tab-title">进行中</span>
-                            </button>
-                            <button class="task-board-tab" data-tab="completed" onclick="window.setTaskBoardTab('completed')">
-                                <svg class="tab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-                                <span class="task-tab-title">已完成</span>
-                            </button>
-                            <button class="task-board-tab" data-tab="archived" onclick="window.setTaskBoardTab('archived')">
-                                <svg class="tab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="15" y2="17"></line></svg>
-                                <span class="task-tab-title">已失效</span>
-                            </button>
-                            <button class="task-board-tab" data-tab="all" onclick="window.setTaskBoardTab('all')">
-                                <svg class="tab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
-                                <span class="task-tab-title">全部任务</span>
-                            </button>
-                        </div>
-                    </div>
-                    <div id="task-board-list" class="task-board-modal-list">
-                        <div class="loading-row flex-grow"><span class="loader"></span> 加载任务中...</div>
-                    </div>
+                <!-- Session Memos -->
+                <div id="memo-panel" class="task-board-panel">
+                    <div id="memo-list" class="task-board-modal-list" aria-live="polite"></div>
                 </div>
 
                 <!-- Scheduled Task Panel -->
@@ -987,35 +965,42 @@
             </div>
 
             <div class="modal-footer flex-between">
-                <button class="btn btn-danger-outline" id="task-board-clear-btn" onclick="window.clearCurrentTaskBoard()">
+                <button class="btn btn-danger-outline" id="task-board-clear-btn" style="display: none" onclick="window.clearScheduledTasks()">
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                    <span id="task-board-clear-text">清空进行中任务</span>
+                    <span>清空所有定时任务</span>
                 </button>
                 <button class="btn btn-primary" id="task-board-create-btn" onclick="window.openCreateTaskModal()">新建</button>
             </div>
         </div>
     </div>
 
-    <!-- MODAL: Create Short or Scheduled Task -->
+    <!-- MODAL: Memo or Scheduled Task -->
     <div id="create-task-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="create-task-title">
         <form id="create-task-form" class="modal-card card" onsubmit="event.preventDefault(); window.submitCreateTask()">
             <div class="modal-header">
-                <h2 id="create-task-title" class="text-h3 pa-4 pb-0 pl-6">新建短期任务</h2>
+                <h2 id="create-task-title" class="text-h3 pa-4 pb-0 pl-6">新增备忘</h2>
                 <button type="button" class="modal-close-btn" aria-label="关闭" onclick="closeModal('create-task-modal')">&times;</button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="create-task-type">
+                <input type="hidden" id="edit-memo-id">
                 <input type="hidden" id="create-task-bot">
                 <input type="hidden" id="create-task-group">
                 <p id="create-task-session" class="text-secondary"></p>
                 <div class="form-group">
-                    <label for="create-task-content">任务内容 <span class="required">*</span></label>
-                    <textarea id="create-task-content" rows="4" required placeholder="请输入任务内容"></textarea>
+                    <label id="create-content-label" for="create-task-content">备忘内容</label>
+                    <textarea id="create-task-content" rows="4" required></textarea>
                 </div>
-                <div id="create-short-task-fields" class="form-group">
-                    <label for="create-task-expires">过期时间（可选）</label>
-                    <input id="create-task-expires" type="datetime-local">
-                    <small class="text-secondary">留空使用配置中的默认有效期。</small>
+                <div id="memo-duration-fields" class="form-group">
+                    <label for="memo-duration" id="memo-duration-label">留存时长</label>
+                    <div class="memo-duration-controls">
+                        <input id="memo-duration" type="number" min="1" step="1" required>
+                        <select id="memo-duration-unit" aria-label="时长单位">
+                            <option value="min">分钟</option>
+                            <option value="h" selected>小时</option>
+                            <option value="d">天</option>
+                        </select>
+                    </div>
                 </div>
                 <div id="create-scheduled-task-fields" class="form-group" style="display: none;">
                     <label for="create-task-time">时间规则 <span class="required">*</span></label>

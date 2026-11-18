@@ -97,70 +97,6 @@ class ActionDispatcher:
                 return msg
         return None
 
-    async def _dispatch_task_board_actions(
-        self,
-        event: AstrMessageEvent,
-        bot_name: str,
-        group_or_user_id: str,
-        llm_result: XmlLlmResult,
-    ) -> list[str]:
-        if not llm_result.task_board_actions:
-            return []
-
-        if not hasattr(self.plugin, "task_board"):
-            return [
-                "<task_board action='unknown' result='failed' reason='task board unavailable'/>"
-            ]
-
-        logs = []
-        actor_user_id = str(event.get_sender_id() or "")
-
-        for item in llm_result.task_board_actions:
-            action = str(item.get("action") or "").strip().lower()
-            if action == "create":
-                creator_user_id = item["user_id"]
-                ok, message, task = await self.plugin.task_board.create_task(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    creator_user_id=creator_user_id,
-                    creator_nickname=llm_result.task_creator_names[creator_user_id],
-                    content=item.get("content") or "",
-                    expires_at=item.get("expires_at") or "",
-                )
-                task_id = task.task_id if task else ""
-                logs.append(
-                    f"<task_board action='create' task_id={quoteattr(task_id)} "
-                    f"user_id={quoteattr(creator_user_id)} "
-                    f"result={quoteattr('success' if ok else 'failed')} "
-                    f"message={quoteattr(message)}/>"
-                )
-                continue
-
-            if action in {"complete", "cancel"}:
-                status = "completed" if action == "complete" else "canceled"
-                ok, message, task = await self.plugin.task_board.close_task(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    task_id=item.get("task_id") or "",
-                    status=status,
-                    actor_user_id=actor_user_id,
-                    reason=item.get("reason") or "",
-                )
-                task_id = task.task_id if task else str(item.get("task_id") or "")
-                logs.append(
-                    f"<task_board action={quoteattr(action)} task_id={quoteattr(task_id)} "
-                    f"result={quoteattr('success' if ok else 'failed')} "
-                    f"message={quoteattr(message)}/>"
-                )
-                continue
-
-            logs.append(
-                f"<task_board action={quoteattr(action)} result='failed' "
-                "message='不支持的任务操作'/>"
-            )
-
-        return logs
-
     async def _dispatch_set_call_name_actions(
         self,
         event: AstrMessageEvent,
@@ -357,40 +293,40 @@ class ActionDispatcher:
         bot_conf: dict,
         is_qq_official: bool,
         success_logs: list[str],
-    ) -> bool:
+    ) -> MessageData | None:
         """派发单条消息复读，并在成功时写入历史缓存与日志"""
         repeat_enabled = self._interactive_feature_enabled("repeat", bot_conf)
         self_id = str(event.get_self_id() or "")
         message_id = str(message_id or "").strip()
         if not message_id:
-            return False
+            return None
         if not repeat_enabled:
             success_logs.append(
                 f"<repeat message_id={quoteattr(message_id)} result='failed' reason='disabled'/>"
             )
-            return False
+            return None
 
         target_msg = self._find_recent_message(bot_name, group_or_user_id, message_id)
         if not target_msg:
             success_logs.append(
                 f"<repeat message_id={quoteattr(message_id)} result='failed' reason='not_in_context_window'/>"
             )
-            return False
+            return None
         if getattr(target_msg, "role", "message") == "operation_log":
             success_logs.append(
                 f"<repeat message_id={quoteattr(message_id)} result='failed' reason='operation_log'/>"
             )
-            return False
+            return None
         if self_id and str(target_msg.user_id or "") == self_id:
             success_logs.append(
                 f"<repeat message_id={quoteattr(message_id)} result='failed' reason='self_message'/>"
             )
-            return False
+            return None
         if target_msg.is_recalled:
             success_logs.append(
                 f"<repeat message_id={quoteattr(message_id)} result='failed' reason='recalled'/>"
             )
-            return False
+            return None
 
         if is_qq_official:
             m_id = message_id
@@ -402,14 +338,14 @@ class ActionDispatcher:
                 success_logs.append(
                     f"<repeat message_id={quoteattr(message_id)} result='failed' reason='invalid_message_id'/>"
                 )
-                return False
+                return None
 
         res = await self._invoke_platform_action(
             event, "repeat_message", is_qq_official, message_id=m_id
         )
         if res in ("handler_not_found", "action_not_supported"):
             logger.debug(f"[Giftia] repeat_message 动作暂不支持 [{res}]")
-            return False
+            return None
 
         if isinstance(res, tuple) and len(res) == 3:
             success, new_message_id, err_msg = res
@@ -435,17 +371,17 @@ class ActionDispatcher:
                 await self.plugin.data_cache.add_message(
                     bot_name, group_or_user_id, msg_data, observed_by_bot=True
                 )
-                return True
+                return msg_data
             else:
                 success_logs.append(
                     f"<repeat message_id={quoteattr(message_id)} result='partial' reason={quoteattr(err_msg or 'missing_message_id')}/>"
                 )
-                return True
+                return None
         else:
             success_logs.append(
                 f"<repeat message_id={quoteattr(message_id)} result='failed' reason={quoteattr(err_msg or 'unknown')}/>"
             )
-            return False
+            return None
 
     async def _dispatch_aiocqhttp_outputs(
         self,
@@ -502,7 +438,7 @@ class ActionDispatcher:
                     await asyncio.sleep(interval)
                 target_msg_id = llm_result.repeat_message_ids[item_index]
                 action_logs = []
-                await self._dispatch_single_repeat(
+                repeated_message = await self._dispatch_single_repeat(
                     event=event,
                     bot_name=bot_name,
                     nickname=nickname,
@@ -512,6 +448,8 @@ class ActionDispatcher:
                     is_qq_official=is_qq_official,
                     success_logs=action_logs,
                 )
+                if repeated_message:
+                    llm_result.thought_anchor = repeated_message
                 await self._record_action_logs(
                     event, bot_name, nickname, group_or_user_id, action_logs
                 )
@@ -728,6 +666,7 @@ class ActionDispatcher:
                 await self.plugin.data_cache.add_message(
                     bot_name, group_or_user_id, msg_data, observed_by_bot=True
                 )
+                llm_result.thought_anchor = msg_data
 
     async def _dispatch_generic_outputs(
         self,
@@ -861,6 +800,7 @@ class ActionDispatcher:
                 await self.plugin.data_cache.add_message(
                     bot_name, group_or_user_id, msg_data, observed_by_bot=True
                 )
+                llm_result.thought_anchor = msg_data
                 sent_index += 1
             except Exception as e:
                 logger.error(f"{bot_name} 通用平台发送消息失败: {e}")
@@ -901,38 +841,20 @@ class ActionDispatcher:
             self.plugin.tts_manager.preprocess_signatures(llm_result, bot_conf)
 
         common_logs = []
-        # Validate task-board creation against identities visible in this reply.
-        # The routing event may belong to a different member of the message batch.
-        valid_requests = []
-        for item in llm_result.task_board_actions:
-            if item.get("action") != "create":
-                valid_requests.append(item)
-                continue
-            creator_user_id = str(item.get("user_id") or "").strip()
-            if creator_user_id and creator_user_id in llm_result.task_creator_names:
-                item["user_id"] = creator_user_id
-                valid_requests.append(item)
-                continue
-            reason = (
-                "创建失败：缺少创建者 user_id。"
-                if not creator_user_id
-                else "创建失败：user_id 不在本轮上下文中。"
-            )
-            log = (
-                f"<task_board action='create' user_id={quoteattr(creator_user_id)} "
-                f"result='failed' reason={quoteattr(reason)} "
-                f"content={quoteattr(item.get('content') or '')}/>"
-            )
-            common_logs.append(log)
-            llm_result.xml_tool_results.append({"name": "task_board", "results": log})
-        llm_result.task_board_actions = valid_requests
+        for operation in llm_result.memo_actions:
+            action = operation["action"]
+            try:
+                memo_id = await self.plugin.memos.apply(
+                    bot_name, group_or_user_id, **operation
+                )
+                common_logs.append(
+                    f"<memo action={quoteattr(action)} id={quoteattr(memo_id)} result='success'/>"
+                )
+            except ValueError as error:
+                log = f"<memo action={quoteattr(action)} result='failed' reason={quoteattr(str(error))}/>"
+                common_logs.append(log)
+                llm_result.xml_tool_results.append({"name": "memo", "results": log})
 
-        task_board_logs = await self._dispatch_task_board_actions(
-            event=event,
-            bot_name=bot_name,
-            group_or_user_id=group_or_user_id,
-            llm_result=llm_result,
-        )
         set_call_name_logs = await self._dispatch_set_call_name_actions(
             event=event,
             bot_name=bot_name,
@@ -945,7 +867,7 @@ class ActionDispatcher:
             group_or_user_id=group_or_user_id,
             llm_result=llm_result,
         )
-        common_logs.extend(task_board_logs + set_call_name_logs + set_status_logs)
+        common_logs.extend(set_call_name_logs + set_status_logs)
 
         for action, user_id in llm_result.user_block_actions:
             try:
@@ -1043,65 +965,70 @@ class ActionDispatcher:
         )
         is_qq_official = is_qq_official_platform(event)
 
+        dispatch_outputs = self._dispatch_generic_outputs
         if is_aiocqhttp or is_qq_official:
-            success_logs = list(common_logs)
-            # 10. 添加表情包日志
-            if llm_result.add_stickers:
-                for sticker_id in llm_result.add_stickers:
-                    success_logs.append(
-                        f"<add_sticker media_id={sticker_id} result='success'/>"
-                    )
+            dispatch_outputs = self._dispatch_aiocqhttp_outputs
+            for sticker_id in llm_result.add_stickers:
+                common_logs.append(
+                    f"<add_sticker media_id={sticker_id} result='success'/>"
+                )
 
-            await self._record_action_logs(
-                event, bot_name, nickname, group_or_user_id, success_logs
-            )
-            await self._dispatch_aiocqhttp_outputs(
+        await self._record_action_logs(
+            event, bot_name, nickname, group_or_user_id, common_logs
+        )
+        input_anchor = llm_result.thought_anchor
+        llm_result.thought_anchor = None
+        try:
+            await dispatch_outputs(
                 event=event,
                 bot_name=bot_name,
                 nickname=nickname,
                 group_or_user_id=group_or_user_id,
                 llm_result=llm_result,
             )
+            # Only an accepted silent turn may annotate its frozen input.
+            if llm_result.thought_anchor is None:
+                llm_result.thought_anchor = input_anchor
+        finally:
+            # A split reply can fail after an earlier segment reached the chat.
+            anchor = llm_result.thought_anchor
+            status = llm_result.status
+            if (
+                anchor
+                and anchor.message_id
+                and status
+                and status.memory_pinned
+                and status.memory
+            ):
+                if await self.plugin.data_cache.pin_thought(
+                    bot_name, group_or_user_id, anchor.message_id, status.memory
+                ):
+                    anchor.pinned_thought = status.memory
 
-            # 在所有有序输出和工具执行完成后再退群。
-            if llm_result.leave:
-                for group_id in llm_result.leave:
-                    if is_qq_official:
-                        g_id = group_id
-                    else:
-                        try:
-                            g_id = int(group_id)
-                        except ValueError:
-                            g_id = None
-                            logger.error(f"{bot_name} 退群数据格式错误: {group_id}")
-                    if g_id is not None:
-                        err_msg = await self._invoke_platform_action(
-                            event, "group_leave", is_qq_official, group_id=g_id
+        # 在所有有序输出和工具执行完成后再退群。
+        if (is_aiocqhttp or is_qq_official) and llm_result.leave:
+            for group_id in llm_result.leave:
+                if is_qq_official:
+                    g_id = group_id
+                else:
+                    try:
+                        g_id = int(group_id)
+                    except ValueError:
+                        g_id = None
+                        logger.error(f"{bot_name} 退群数据格式错误: {group_id}")
+                if g_id is not None:
+                    err_msg = await self._invoke_platform_action(
+                        event, "group_leave", is_qq_official, group_id=g_id
+                    )
+                    if err_msg not in ("handler_not_found", "action_not_supported"):
+                        await self._record_action_logs(
+                            event,
+                            bot_name,
+                            nickname,
+                            group_or_user_id,
+                            [
+                                f"<leave user_id={event.get_self_id()} result={err_msg or 'success'}/>"
+                            ],
                         )
-                        if err_msg not in ("handler_not_found", "action_not_supported"):
-                            await self._record_action_logs(
-                                event,
-                                bot_name,
-                                nickname,
-                                group_or_user_id,
-                                [
-                                    f"<leave user_id={event.get_self_id()} result={err_msg or 'success'}/>"
-                                ],
-                            )
-                        else:
-                            logger.debug(
-                                f"[Giftia] group_leave 动作暂不支持 [{err_msg}]"
-                            )
-
-            return
-
-        await self._record_action_logs(
-            event, bot_name, nickname, group_or_user_id, common_logs
-        )
-        await self._dispatch_generic_outputs(
-            event=event,
-            bot_name=bot_name,
-            nickname=nickname,
-            group_or_user_id=group_or_user_id,
-            llm_result=llm_result,
-        )
+                    else:
+                        logger.debug(f"[Giftia] group_leave 动作暂不支持 [{err_msg}]")
