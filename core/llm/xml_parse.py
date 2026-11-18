@@ -1,7 +1,7 @@
 import ast
 import json
 import re
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
 
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
@@ -38,6 +38,71 @@ class XmlParse:
 
         self.random = random
         self.sticker_summaries = sticker_summaries or ["图片"]
+
+    _THINK_BLOCK_RE = re.compile(
+        r"<\s*think\s*>[\s\S]*?<\s*/\s*think\s*>", re.IGNORECASE
+    )
+    _LEADING_CLOSE_THINK_RE = re.compile(r"^[\s\S]*?<\s*/\s*think\s*>", re.IGNORECASE)
+    _REPORT_BLOCK_RE = re.compile(
+        r"<\s*report\b[^>]*>([\s\S]*?)<\s*/\s*report\s*>", re.IGNORECASE
+    )
+    _OUTER_FENCE_RE = re.compile(r"^```(?:[a-zA-Z0-9_-]*)\s*\n?([\s\S]*?)\n?```$")
+    _CDATA_RE = re.compile(r"^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$")
+    _UNWRAPPED_TAG_BODY_RE = re.compile(
+        r"^<\s*(?:tool_call|sub_agent|message|status)\b[\s\S]*</\s*(?:tool_call|sub_agent|message|status)\s*>$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def strip_thinking_blocks(cls, text: str) -> str:
+        """Remove closed <think> sections and unwrap an outermost Markdown fence."""
+        if not text:
+            return ""
+        cleaned = cls._THINK_BLOCK_RE.sub("", str(text)).strip()
+        if re.search(r"<\s*/\s*think\s*>", cleaned, re.IGNORECASE) and not re.search(
+            r"<\s*think\s*>", cleaned, re.IGNORECASE
+        ):
+            cleaned = cls._LEADING_CLOSE_THINK_RE.sub("", cleaned, count=1).strip()
+        fence = cls._OUTER_FENCE_RE.fullmatch(cleaned)
+        if fence:
+            cleaned = fence.group(1).strip()
+        return cleaned
+
+    @classmethod
+    def decode_subagent_report(cls, raw_text: str) -> str:
+        """Extract and validate a worker's final natural-language <report> body."""
+        cleaned = cls.strip_thinking_blocks(raw_text)
+        if not cleaned:
+            raise ValueError("子 Agent 没有返回结果")
+
+        matches = list(cls._REPORT_BLOCK_RE.finditer(cleaned))
+        remainder = cls._REPORT_BLOCK_RE.sub("", cleaned).strip()
+        if re.search(r"<\s*/?\s*report\b", remainder, re.IGNORECASE):
+            raise ValueError("子 Agent 的 <report> 标签未正确闭合")
+        if re.search(r"<\s*/?\s*(?:tool_call|sub_agent)\b", remainder, re.IGNORECASE):
+            raise ValueError("子 Agent 返回了未执行的控制标签")
+        if not matches:
+            raise ValueError("子 Agent 汇报缺少 <report>...</report> 包裹")
+
+        bodies: list[str] = []
+        for match in matches:
+            body = match.group(1)
+            cdata = cls._CDATA_RE.fullmatch(body)
+            if cdata:
+                text = cdata.group(1).strip()
+            else:
+                text = unescape(body, {"&quot;": '"', "&apos;": "'"}).strip()
+            if text:
+                if cls._UNWRAPPED_TAG_BODY_RE.fullmatch(text):
+                    raise ValueError("子 Agent 在 <report> 中输出了无效控制标签")
+                bodies.append(text)
+
+        unique = list(dict.fromkeys(bodies))
+        if not unique:
+            raise ValueError("子 Agent 返回了空的 <report> 内容")
+        if len(unique) > 1:
+            raise ValueError("子 Agent 返回了多个冲突的 <report> 标签")
+        return unique[0]
 
     @staticmethod
     def str_to_int_bool(val):
@@ -460,6 +525,23 @@ class XmlParse:
                             f"Tool call数据不完整或解析失败: {child.attrs}, xml_str: {xml_str[:1000]}"
                         )
                         raise ValueError(f"Malformed tool call in XML: {text}")
+
+                elif tag_name == "sub_agent":
+                    task_id = (
+                        self._attr_str(child, "task_id", "").strip()
+                        or self._attr_str(child, "id", "").strip()
+                    )
+                    instruction = (
+                        child.get_text(strip=True)
+                        or self._attr_str(child, "instruction", "").strip()
+                    )
+                    payload = {"instruction": instruction}
+                    if task_id:
+                        payload["task_id"] = task_id
+                    result.sub_agent_tasks.append(payload)
+                    result.output_order.append(
+                        ("sub_agent", len(result.sub_agent_tasks) - 1)
+                    )
 
                 elif tag_name == "memo":
                     result.memo_actions.append(

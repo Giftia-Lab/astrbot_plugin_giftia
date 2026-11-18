@@ -3,7 +3,11 @@
  */
 
 const escapeHtml = (str) => window.escapeHtml ? window.escapeHtml(str) : String(str || '');
-const showToast = (msg, type) => window.showToast ? window.showToast(msg, type) : alert(msg);
+const showToast = (msg, type) => (
+    typeof window.showToast === 'function'
+        ? window.showToast(msg, type)
+        : console.warn('[Giftia Dashboard]', msg)
+);
 const sanitizeId = (str) => String(str || '').replace(/[^a-zA-Z0-9_-]/g, '_');
 
 let stateBots = [];
@@ -20,8 +24,6 @@ let currentEditingBotName = null;
 let adaptersTagSelect = null;
 let subagentToolSelect = null;
 let subagentProvidersSelect = null;
-let callOnlyToolSelect = null;
-let callOnlyTools = [];
 let decProvidersTagSelect = null;
 let replyProvidersTagSelect = null;
 let invalidReplyFallbackTagSelect = null;
@@ -45,18 +47,42 @@ async function loadBotsData() {
     }
 }
 
+const deletingBots = new Set();
+
+function ensureBotsGridDelegation(container) {
+    if (!container || !container.dataset || container.dataset.delegated === '1' || typeof container.addEventListener !== 'function') {
+        return;
+    }
+    container.dataset.delegated = '1';
+    container.addEventListener('click', event => {
+        const btn = event.target?.closest?.('[data-bot-action]');
+        if (!btn || (typeof container.contains === 'function' && !container.contains(btn))) return;
+        const action = btn.dataset.botAction;
+        const botName = btn.dataset.botName;
+        if (action === 'create') openBotEditModal();
+        else if (action === 'edit') openBotEditModal(botName);
+        else if (action === 'delete') deleteBotConfig(botName);
+    });
+    container.addEventListener('change', event => {
+        const input = event.target?.closest?.('[data-bot-action="toggle"]');
+        if (!input || (typeof container.contains === 'function' && !container.contains(input))) return;
+        toggleBotStatus(input.dataset.botName, input.checked);
+    });
+}
+
 /**
  * Render Bot Cards Grid.
  */
 function renderBotsGrid() {
     const container = document.getElementById('bots-grid');
     if (!container) return;
+    ensureBotsGridDelegation(container);
 
     if (!stateBots || stateBots.length === 0) {
         container.innerHTML = `
             <div class="empty-state card" style="grid-column: 1 / -1; padding: 40px; text-align: center;">
                 <p style="color: var(--font-secondary); margin-bottom: 15px;">暂无创设的机器人配置</p>
-                <button class="btn btn-primary" onclick="openBotEditModal()">+ 创建第一个机器人</button>
+                <button type="button" class="btn btn-primary" data-bot-action="create">+ 创建第一个机器人</button>
             </div>
         `;
         return;
@@ -64,9 +90,11 @@ function renderBotsGrid() {
 
     container.innerHTML = stateBots.map(bot => {
         const enabled = bot.enabled !== false;
-        const name = escapeHtml(bot.name || '未命名');
-        const nickname = escapeHtml(bot.nickname || name);
-        const safeDomId = sanitizeId(bot.name);
+        const rawName = bot.name || '';
+        const name = escapeHtml(rawName || '未命名');
+        const nickname = escapeHtml(bot.nickname || rawName || '未命名');
+        const safeDomId = sanitizeId(rawName);
+        const escapedBotName = escapeHtml(rawName);
         const adapters = bot.adapter_ids || [];
         const ttsEnabled = bot.tts_config?.enabled === true;
         const activeFeaturesCount = (bot.enabled_interactive_features || []).length;
@@ -89,7 +117,7 @@ function renderBotsGrid() {
                         </div>
                     </div>
                     <div class="switch-container" title="${enabled ? '暂停该机器人' : '启用该机器人'}">
-                        <input type="checkbox" class="switch-checkbox" id="toggle-bot-${safeDomId}" ${enabled ? 'checked' : ''} onchange="toggleBotStatus('${escapeHtml(bot.name)}', this.checked)">
+                        <input type="checkbox" class="switch-checkbox" id="toggle-bot-${safeDomId}" data-bot-action="toggle" data-bot-name="${escapedBotName}" ${enabled ? 'checked' : ''}>
                         <label for="toggle-bot-${safeDomId}" class="switch-label"></label>
                     </div>
                 </div>
@@ -110,10 +138,10 @@ function renderBotsGrid() {
                 </div>
 
                 <div class="bot-card-actions flex-between" style="margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--border-color, rgba(255,255,255,0.08));">
-                    <button class="btn btn-small btn-secondary" onclick="openBotEditModal('${escapeHtml(bot.name)}')">
+                    <button type="button" class="btn btn-small btn-secondary" data-bot-action="edit" data-bot-name="${escapedBotName}">
                         ✏️ 编辑配置
                     </button>
-                    <button class="btn btn-small btn-danger-link" style="color: var(--color-danger, #ef4444); border: none; background: transparent; cursor: pointer;" onclick="deleteBotConfig('${escapeHtml(bot.name)}')">
+                    <button type="button" class="btn btn-small btn-danger-link" style="color: var(--color-danger, #ef4444); border: none; background: transparent; cursor: pointer;" data-bot-action="delete" data-bot-name="${escapedBotName}">
                         删除
                     </button>
                 </div>
@@ -144,21 +172,37 @@ async function toggleBotStatus(botName, enabled) {
 /**
  * Delete Bot.
  */
-async function deleteBotConfig(botName) {
-    if (!confirm(`确定要彻底删除机器人 "${botName}" 的配置吗？`)) {
+function deleteBotConfig(botName) {
+    if (!botName || deletingBots.has(botName)) return;
+
+    const performDelete = async () => {
+        if (deletingBots.has(botName)) return;
+        deletingBots.add(botName);
+        try {
+            const json = await window.apiPost('/bots/delete', { name: botName });
+            if (json && json.status === 'success') {
+                showToast(json.message || '成功删除机器人', 'success');
+                await loadBotsData();
+            } else {
+                showToast(json?.message || '删除失败', 'error');
+            }
+        } catch (err) {
+            showToast('删除请求异常', 'error');
+        } finally {
+            deletingBots.delete(botName);
+        }
+    };
+
+    if (typeof window.showConfirm === 'function') {
+        window.showConfirm(
+            '确认删除机器人',
+            `确定要彻底删除机器人 "${botName}" 的配置吗？此操作无法撤销。`,
+            performDelete
+        );
         return;
     }
-    try {
-        const json = await window.apiPost('/bots/delete', { name: botName });
-        if (json && json.status === 'success') {
-            showToast(json.message || '成功删除机器人', 'success');
-            await loadBotsData();
-        } else {
-            showToast(json?.message || '删除失败', 'error');
-        }
-    } catch (err) {
-        showToast('删除请求异常', 'error');
-    }
+
+    showToast('确认弹窗不可用，请刷新页面后重试', 'error');
 }
 
 /**
@@ -225,22 +269,6 @@ function openBotEditModal(botName = null) {
         return (stateBotMetadata.function_tools || []).filter(name =>
             persona && (persona.tools == null || persona.tools.includes(name)));
     };
-    callOnlyTools = bot.llm_reply_conf?.call_only_tools || [];
-    const renderCallOnlyTools = () => {
-        const delegated = new Set(subagentToolSelect.getValues());
-        const names = new Set(personaToolNames().filter(name => !delegated.has(name)));
-        callOnlyToolSelect?.destroy();
-        callOnlyToolSelect = new TagSelectComponent('bot-form-call-only-tools', {
-            placeholder: names.size ? '选择只记录调用的工具…' : '当前主 Agent 没有可用工具',
-            availableOptions: Array.from(names, id => ({id, name: id})),
-            selectedValues: callOnlyTools.filter(name => names.has(name)),
-            allowCustom: false,
-            onChange: selection => {
-                // Preserve the policy for tools temporarily outside the main tool set.
-                callOnlyTools = [...callOnlyTools.filter(name => !names.has(name)), ...selection];
-            }
-        });
-    };
     const renderSubagentTools = (selection, keepSaved = false) => {
         const names = personaToolNames();
         subagentToolSelect?.destroy();
@@ -248,10 +276,8 @@ function openBotEditModal(botName = null) {
             placeholder: names.length ? '选择要委派的工具…' : '当前人格没有可分配的工具',
             availableOptions: names.map(id => ({id, name: id})),
             selectedValues: keepSaved ? selection : selection.filter(name => names.includes(name)),
-            allowCustom: false,
-            onChange: renderCallOnlyTools
+            allowCustom: false
         });
-        renderCallOnlyTools();
     };
     renderSubagentTools(bot.llm_reply_conf?.subagent_tools || [], true);
     personaField.onchange = () => renderSubagentTools(subagentToolSelect.getValues());
@@ -817,7 +843,6 @@ async function saveBotFromModal() {
             persona_id: document.getElementById('bot-form-reply-persona')?.value || 'default',
             subagent_provider_ids: subagentProvidersSelect.getValues(),
             subagent_tools: subagentToolSelect.getValues(),
-            call_only_tools: callOnlyTools,
             review_provider_id: document.getElementById('bot-form-review-provider').value,
         },
         tts_config: {

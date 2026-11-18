@@ -52,6 +52,7 @@ class ReplyPipeline:
             "leave",
             "user_block_actions",
             "tools_to_call",
+            "sub_agent_tasks",
             "native_tools_called",
             "add_stickers",
             "send_stickers",

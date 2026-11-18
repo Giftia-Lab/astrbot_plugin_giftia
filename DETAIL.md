@@ -52,7 +52,7 @@
 - **适配器ID列表 (`adapter_ids`)**: 绑定的平台/账号 ID（通过 `/sid` 查看），支持多平台共用同一记忆。
 - **关联 AstrBot 人格 (`llm_reply_conf.persona_id`)**: 在 WebUI 的 **身份与适配器** 页签中绑定 AstrBot 控制台的人格配置，回复时自动抽取该人格的 System Prompt 以及工具能力限制 (`tools`)。
 - **子 Agent** 页签配置可用工具（`llm_reply_conf.subagent_tools`）和供应商列表（`llm_reply_conf.subagent_provider_ids`）。工具留空时关闭委派，供应商留空时继承正式回复。选中的人格工具由后台子任务独占。[委派和追问说明](docs/zh/subagent-tools.md)
-- **主 Agent · 仅记录调用的工具**（`llm_reply_conf.call_only_tools`）在 **身份与适配器** 页签配置。所选工具的操作日志仅保存工具名、时间和执行状态，工具结果供当轮回复使用。
+- 主 Agent 函数工具（原生与 XML）的操作日志固定仅保存工具名、时间和执行状态，不记录参数或返回值，工具结果仅供当轮回复使用；单轮回复的原生工具循环日志按工具名去重折叠为一条。
 
 ### 2. 小模型接话决策 (`decision_conf`)
 群聊默认使用前置决策是否接话，仍遵循接话触发条件与所选的 `@` 策略；被允许的私聊默认直接回复，跳过小模型决策。

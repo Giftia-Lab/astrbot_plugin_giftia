@@ -480,7 +480,6 @@ class BotApi:
                 for key in (
                     "subagent_provider_ids",
                     "subagent_tools",
-                    "call_only_tools",
                     "invalid_reply_fallback_provider_ids",
                 ):
                     reply_conf.setdefault(key, previous_reply.get(key, []))

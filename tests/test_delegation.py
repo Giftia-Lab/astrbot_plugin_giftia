@@ -173,7 +173,7 @@ async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
     p.context.tool_loop_agent.side_effect = [
         LLMResponse(
             "assistant",
-            '<tool_call name="delegate_task">{"instruction":"查版本"}</tool_call><message>我去查。</message>',
+            "<sub_agent>查版本</sub_agent><message>我去查。</message>",
         ),
         LLMResponse("assistant", "<message>支持版本 4，依据是 evidence-42。</message>"),
     ]
@@ -187,7 +187,7 @@ async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
             tools_call_ids=["1"],
         )
     )
-    worker_report = LLMResponse("assistant", "支持版本 4，evidence-42")
+    worker_report = LLMResponse("assistant", "<report>支持版本 4，evidence-42</report>")
     p.context.llm_generate.side_effect = (
         [
             RuntimeError("provider request failed"),
@@ -226,9 +226,14 @@ async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
         assert '<tool_call name="lookup"' not in parent["system_prompt"]
     else:
         assert [t.name for t in parent["tools"].tools] == ["direct"]
-    assert "delegate_task" in parent["system_prompt"] and "查版本" in wake["prompt"]
+    assert "<sub_agent>" in parent["system_prompt"] and "查版本" in wake["prompt"]
+    assert "delegate_task" not in parent["system_prompt"]
+    assert "<sub_agent>" not in wake["system_prompt"]
     assert "delegate_task" not in wake["system_prompt"]
     assert "evidence-42" in wake["prompt"] and LONG_RESULT not in wake["prompt"]
+    assert "汇报内容：\n支持版本 4，evidence-42" in wake["prompt"]
+    assert "&lt;report&gt;" not in wake["prompt"] and "<report>" not in wake["prompt"]
+    assert "&quot;task_id&quot;" not in wake["prompt"]
     worker_input = p.context.llm_generate.await_args.kwargs
     assert (
         LONG_RESULT in worker_input["prompt"]
@@ -273,8 +278,8 @@ async def test_provider_configuration_without_tools_omits_delegation_prompt(
             event, "bot", "7", state, [message], None, [], None
         )
     request = p.context.tool_loop_agent.await_args.kwargs
-    assert "delegate_task" not in request["system_prompt"]
-    assert "后台委派" not in request["system_prompt"]
+    assert "<sub_agent>" not in request["system_prompt"]
+    assert "子 Agent 委派" not in request["system_prompt"]
     assert "subagent_tasks" not in request["prompt"]
     if force_xml:
         assert '<tool_call name="lookup"' in request["system_prompt"]
@@ -286,13 +291,12 @@ async def test_provider_configuration_without_tools_omits_delegation_prompt(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail", [False, True])
-async def test_xml_call_only_keeps_same_turn_results_and_logs_every_call(rt, fail):
+async def test_xml_tools_always_keep_same_turn_results_and_log_call_only(rt, fail):
     p, event = rt.p, rt.e
     p.tools_config["force_xml_tools"] = True
-    p.bot_map["bot"]["llm_reply_conf"]["call_only_tools"] = ["direct"]
     message = MessageData(message_id="a", user_id="alice", content="查资料")
     state = SessionState(current=[QueuedMessage(event, message, True, 0, 3)])
-    # Distinct calls to one tool produce identical history entries in this mode.
+    # Distinct calls to one tool produce call-only history entries without arguments or results.
     tool_calls = "".join(
         f'<tool_call name="alias:direct">{json.dumps({"query": query, "fail": fail})}</tool_call>'
         for query in ("private query 1", "private query 2")
@@ -314,6 +318,8 @@ async def test_xml_call_only_keeps_same_turn_results_and_logs_every_call(rt, fai
         rows = await cur.fetchall()
     assert len(rows) == 2
     for content, created_at in rows:
+        assert "private query" not in content
+        assert LONG_RESULT not in content and TOOL_ERROR not in content
         entry = fromstring(content)
         assert entry.attrib == {
             "name": "direct",
@@ -339,9 +345,9 @@ async def test_followup_while_completed_wakeup_is_blocked_by_parent_lock(
 
     async def worker_reply(**kwargs):
         if "Linux works" in kwargs["prompt"]:
-            return LLMResponse("assistant", "Linux and Windows work")
+            return LLMResponse("assistant", "<report>Linux and Windows work</report>")
         await release_worker.wait()
-        return LLMResponse("assistant", "Linux works")
+        return LLMResponse("assistant", "<report>Linux works</report>")
 
     rt.p.context.llm_generate.side_effect = worker_reply
     followup = {**rt.scope, "delegation_inputs": [source("b", "也查 Windows")]}
@@ -370,7 +376,7 @@ async def test_followup_while_completed_wakeup_is_blocked_by_parent_lock(
         assert "ready" in await rt.d.context("bot", rt.e.unified_msg_origin)
         return LLMResponse(
             "assistant",
-            f'<tool_call name="delegate_task">{json.dumps(args, ensure_ascii=False)}</tool_call>',
+            f'<sub_agent task_id="{tid}">也查 Windows</sub_agent>',
         )
 
     rt.p.context.tool_loop_agent.side_effect = delayed_parent_reply
@@ -410,8 +416,8 @@ async def test_followup_during_last_tool_preserves_result_and_replenishes_rounds
     wake = rt.p.chat_manager.deliver_delegation = AsyncMock(return_value=True)
     rt.p.context.llm_generate.side_effect = [
         LLMResponse("assistant", tools_call_name=["lookup"], tools_call_args=[{}]),
-        LLMResponse("assistant", "added answer"),
-        LLMResponse("assistant", "later answer"),
+        LLMResponse("assistant", "<report>added answer</report>"),
+        LLMResponse("assistant", "<report>later answer</report>"),
     ]
     tid, _ = await rt.d.submit(rt.e, "bot", {"instruction": "first"}, rt.scope)
     await asyncio.wait_for(started.wait(), 3)
@@ -470,49 +476,106 @@ async def test_scoped_tools_budget_and_private_transcript(rt):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("call_only", [False, True])
-async def test_native_history_preserves_all_yields_and_error(rt, call_only):
-    if call_only:
-        rt.p.bot_map["bot"]["llm_reply_conf"]["call_only_tools"] = ["lookup"]
+async def test_native_history_folds_repeated_calls_into_one_call_only_entry(rt):
     hooks = ReplyToolHistory(rt.p, rt.e, "bot", "7")
-    tool = hooks.observe(ToolSet(tools=[rt.lookup])).tools[0]
+    direct = rt.p.context.get_llm_tool_manager().get_full_tool_set().get_tool("direct")
+    observed = hooks.observe(ToolSet(tools=[rt.lookup, direct]))
+    lookup_tool, direct_tool = observed.get_tool("lookup"), observed.get_tool("direct")
     run = AgentContextWrapper(
         context=AstrAgentContext(context=rt.p.context, event=rt.e)
     )
-    await hooks.on_tool_start(run, tool, {"query": "<abc>"})
+    await hooks.on_tool_start(run, lookup_tool, {"query": "<abc>"})
     parts = [
-        part async for part in FunctionToolExecutor.execute(tool, run, query="<abc>")
+        part
+        async for part in FunctionToolExecutor.execute(lookup_tool, run, query="<abc>")
     ]
     assert parts[0].content[0].text == LONG_RESULT
-    await hooks.on_tool_end(run, tool, {"query": "<abc>"}, parts[-1])
-    await hooks.on_tool_start(run, tool, {"query": "second"})
-    await hooks.finish(RuntimeError("failed after start"))
-    async with rt.db.query("SELECT content FROM chat_history ORDER BY id") as cur:
-        entries = [fromstring(row[0]) for row in await cur.fetchall()]
-    assert [e.get("status") for e in entries] == [
-        "started",
-        "finished",
-        "started",
-        "failed",
+    await hooks.on_tool_end(run, lookup_tool, {"query": "<abc>"}, parts[-1])
+    await hooks.on_tool_start(run, direct_tool, {"query": "secret"})
+    direct_parts = [
+        part
+        async for part in FunctionToolExecutor.execute(direct_tool, run, query="secret")
     ]
-    if call_only:
-        assert all(e.get("name") == "lookup" and e.text is None for e in entries)
-        assert all(set(e.attrib) == {"name", "status"} for e in entries)
-    else:
-        assert entries[0].get("id") == entries[1].get("id") != entries[2].get("id")
-        assert json.loads(entries[0].text)["arguments"] == {"query": "<abc>"}
-        assert LONG_RESULT in entries[1].text and "evidence-42" in entries[1].text
-        assert "failed after start" in entries[-1].text
+    await hooks.on_tool_end(run, direct_tool, {"query": "secret"}, direct_parts[-1])
+    await hooks.on_tool_start(run, lookup_tool, {"query": "second"})
+    await hooks.finish(RuntimeError("failed after start"))
+    await hooks.finish()
+    async with rt.db.query("SELECT content, role FROM chat_history ORDER BY id") as cur:
+        rows = await cur.fetchall()
+    assert len(rows) == 1
+    content, role = rows[0]
+    assert role == "operation_log"
+    for leaked in ("<abc>", "secret", LONG_RESULT, "evidence-42", "failed after start"):
+        assert leaked not in content
+    entries = list(fromstring(f"<root>{content}</root>"))
+    assert [e.attrib for e in entries] == [
+        {"name": "lookup", "status": "failed"},
+        {"name": "direct", "status": "finished"},
+    ]
+    assert all(e.text is None for e in entries)
+
+
+@pytest.mark.asyncio
+async def test_native_reply_loop_folds_tools_per_turn_and_skips_empty_turns(rt):
+    p, event = rt.p, rt.e
+    p.bot_map["bot"]["llm_reply_conf"]["subagent_tools"] = []
+    turns = 0
+
+    async def loop_turns(**kwargs):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            hooks = kwargs["agent_hooks"]
+            run = AgentContextWrapper(context=kwargs["agent_context"])
+            for name, query in (
+                ("direct", "first"),
+                ("lookup", "middle"),
+                ("direct", "second"),
+            ):
+                tool = kwargs["tools"].get_tool(name)
+                await hooks.on_tool_start(run, tool, {"query": query})
+                parts = [
+                    part
+                    async for part in FunctionToolExecutor.execute(
+                        tool, run, query=query
+                    )
+                ]
+                await hooks.on_tool_end(run, tool, {"query": query}, parts[-1])
+            return LLMResponse("assistant", "<message>查到了。</message>")
+        return LLMResponse("assistant", "<message>直接回复。</message>")
+
+    p.context.tool_loop_agent.side_effect = loop_turns
+    await p.call_llm.call_llm_reply(
+        event, "7", ["model"], "persona", "prompt1", use_source_tools=True
+    )
+    await p.call_llm.call_llm_reply(
+        event, "7", ["model"], "persona", "prompt2", use_source_tools=True
+    )
+    async with rt.db.query(
+        "SELECT content FROM chat_history WHERE role='operation_log' ORDER BY id"
+    ) as cur:
+        rows = await cur.fetchall()
+    assert len(rows) == 1
+    entries = list(fromstring(f"<root>{rows[0][0]}</root>"))
+    assert [entry.attrib for entry in entries] == [
+        {"name": "direct", "status": "finished"},
+        {"name": "lookup", "status": "finished"},
+    ]
+    assert all(entry.text is None for entry in entries)
+    for leaked in ("first", "middle", "second", LONG_RESULT):
+        assert leaked not in rows[0][0]
 
 
 @pytest.mark.asyncio
 async def test_private_transcript_reachable_only_from_receipt_and_removed_with_chat(rt):
     rt.p.context.llm_generate.return_value = LLMResponse(
-        "assistant", "only the conclusion"
+        "assistant", "<report>only the conclusion</report>"
     )
     rt.p.chat_manager.deliver_delegation = AsyncMock(return_value=True)
-    response = await rt.p.chat_manager.action_dispatcher.tool_executor.execute_tool(
-        rt.e, "bot", "Bot", "7", "delegate_task", {"instruction": "first"}, rt.scope
+    response = (
+        await rt.p.chat_manager.action_dispatcher.tool_executor.execute_delegation(
+            rt.e, "bot", "Bot", "7", {"instruction": "first"}, rt.scope
+        )
     )
     await asyncio.wait_for(rt.d.workers[response["delegated"]], 3)
     assert await rt.d.submit(rt.e, "bot", {"instruction": "first"}, rt.scope) == (
@@ -573,10 +636,203 @@ async def test_budget_exhaustion_returns_evidence_without_running_more_tools(rt)
     wake = rt.p.chat_manager.deliver_delegation = AsyncMock(return_value=True)
     rt.p.context.llm_generate.side_effect = [
         LLMResponse("assistant", tools_call_name=["lookup"], tools_call_args=[{}]),
-        LLMResponse("assistant", "From evidence-42"),
+        LLMResponse("assistant", "<report>From evidence-42</report>"),
     ]
     tid, _ = await rt.d.submit(rt.e, "bot", {"instruction": "first"}, rt.scope)
     await asyncio.wait_for(rt.d.workers[tid], 3)
     assert wake.await_args.args[1]["result"] == "From evidence-42"
     last = rt.p.context.llm_generate.await_args.kwargs
     assert last["tools"] is None and "evidence-42" in last["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_report_uses_natural_language_and_higher_truncation_limit(rt):
+    p, event = rt.p, rt.e
+    p.reply_message_truncate_limit = 1500
+    p.context.tool_loop_agent.return_value = LLMResponse(
+        "assistant", "<message>已转达完整报告。</message>"
+    )
+    p.aiocqhttp.send_message.return_value = (True, "final")
+
+    long_natural_report = "详细核查结论：" + ("甲" * 3500) + "【末尾核对】"
+    await p.chat_manager.deliver_delegation(
+        event,
+        {
+            "id": 9,
+            "revision": 1,
+            "bot_name": "bot",
+            "session_id": "7",
+            "instruction": "核对完整版本说明",
+            "result": long_natural_report,
+        },
+        [],
+    )
+    wake_prompt = p.context.tool_loop_agent.await_args.kwargs["prompt"]
+    assert "【末尾核对】" in wake_prompt
+    assert "内容已截断" not in wake_prompt
+    assert "委派目标：核对完整版本说明" in wake_prompt
+    assert '"task_id"' not in wake_prompt
+
+    oversized_report = "超长报告：" + ("乙" * 6500) + "【超出截断边界】"
+    await p.chat_manager.deliver_delegation(
+        event,
+        {
+            "id": 10,
+            "revision": 1,
+            "bot_name": "bot",
+            "session_id": "7",
+            "instruction": "超长报告测试",
+            "result": oversized_report,
+        },
+        [],
+    )
+    oversized_prompt = p.context.tool_loop_agent.await_args.kwargs["prompt"]
+    assert "内容已截断" in oversized_prompt
+    assert "【超出截断边界】" not in oversized_prompt
+
+
+@pytest.mark.asyncio
+async def test_subagent_execution_emits_info_logs_and_supports_silent_tag(
+    rt, monkeypatch
+):
+    p, event = rt.p, rt.e
+    info_logs = []
+    monkeypatch.setattr(
+        "core.conversation.delegation.logger.info",
+        lambda msg, *args: info_logs.append(msg % args if args else msg),
+    )
+    original = MessageData(
+        message_id="a",
+        user_id="alice",
+        nickname="Alice",
+        group_or_user_id="7",
+        content="帮我查一下",
+        time=datetime.now().isoformat(),
+    )
+    await p.data_cache.add_message("bot", "7", original)
+    state = SessionState(current=[QueuedMessage(event, original, True, 0, 3)])
+    p.context.tool_loop_agent.side_effect = [
+        LLMResponse(
+            "assistant",
+            "<status>思考: 查一下</status><sub_agent>静默查资料</sub_agent>",
+        ),
+        LLMResponse("assistant", "<message>查完了。</message>"),
+    ]
+    p.context.llm_generate.side_effect = [
+        LLMResponse(
+            "assistant",
+            tools_call_name=["lookup"],
+            tools_call_args=[{}],
+            tools_call_ids=["1"],
+        ),
+        LLMResponse("assistant", "<report>已核对完毕</report>"),
+    ]
+    p.aiocqhttp.send_message.return_value = (True, "final")
+    async with session_lock_manager.acquire_lock(event.unified_msg_origin):
+        assert await p.chat_manager._reply_batch(
+            event, "bot", "7", state, [original], None, [], None
+        )
+        worker = next(iter(rt.d.workers.values()))
+    await asyncio.wait_for(worker, 5)
+    worker_sys = p.context.llm_generate.await_args.kwargs["system_prompt"]
+    assert "<report>" in worker_sys and "自然语言纯文本" in worker_sys
+    joined = "\n".join(info_logs)
+    for keyword in (
+        "新建委派任务",
+        "开始执行轮次",
+        "模型轮次完成",
+        "执行工具",
+        "工具完成",
+        "汇报已就绪，等待投递",
+        "开始投递汇报",
+        "汇报投递结束",
+    ):
+        assert keyword in joined
+    async with rt.db.query(
+        "SELECT content FROM chat_history WHERE message_id LIKE 'delegate_%' ORDER BY id"
+    ) as cur:
+        receipts = [row[0] for row in await cur.fetchall()]
+    assert receipts[0].startswith('<sub_agent task_id="1" status="finished">')
+    assert "静默查资料" in receipts[0]
+    assert receipts[1].startswith('<subagent_result task_id="1"')
+    assert "已核对完毕" in receipts[1]
+
+
+@pytest.mark.parametrize(
+    "bad_output",
+    [
+        "",
+        "   ",
+        "<think>只思考不输出</think>",
+        "忘记加标签的裸文本",
+        "<message>误用主人格消息标签</message>",
+        '<tool_call name="lookup">{}</tool_call>',
+        "<report>未闭合标签截断",
+        "<report>完整</report><report>后面又截断",
+        "<report>   </report>",
+        "<report>答案A</report><report>答案B</report>",
+        "<report><message>套娃标签</message></report>",
+    ],
+)
+def test_decode_subagent_report_rejects_malformed_outputs(bad_output):
+    with pytest.raises(ValueError):
+        XmlParse.decode_subagent_report(bad_output)
+
+
+def test_decode_subagent_report_unwraps_valid_formats():
+    assert (
+        XmlParse.decode_subagent_report(
+            '<think>内部思考 <tool_call name="x">{}</tool_call></think>\n'
+            "```xml\n"
+            "<report>兼容链接 https://a.com?x=1&y=2 与比较 a < b &amp; c &gt; d</report>\n"
+            "```"
+        )
+        == "兼容链接 https://a.com?x=1&y=2 与比较 a < b & c > d"
+    )
+    assert (
+        XmlParse.decode_subagent_report(
+            "推理过程\n</think>\n<report><![CDATA[原文 <tag> & unchanged]]></report>"
+        )
+        == "原文 <tag> & unchanged"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_retries_invalid_report_and_delivers_parsed_result(rt):
+    p, event = rt.p, rt.e
+    p.call_llm.network_conf["reply_retry_times"] = 2
+    await p.data_cache.add_message(
+        "bot",
+        "7",
+        MessageData(
+            message_id="a",
+            user_id="alice",
+            nickname="Alice",
+            group_or_user_id="7",
+            content="核对链接",
+            time=datetime.now().isoformat(),
+        ),
+    )
+    p.context.tool_loop_agent.return_value = LLMResponse(
+        "assistant", "<message>已转达核实结果。</message>"
+    )
+    p.context.llm_generate.side_effect = [
+        LLMResponse("assistant", "糟糕，我直接输出了未包裹的文本"),
+        LLMResponse(
+            "assistant",
+            "<think>重新整理</think>\n```xml\n<report>支持版本 v4.30，参考 https://a.com?x=1&y=2</report>\n```",
+        ),
+    ]
+    p.aiocqhttp.send_message.return_value = (True, "final")
+    tid, _ = await rt.d.submit(event, "bot", {"instruction": "核对链接"}, rt.scope)
+    await asyncio.wait_for(rt.d.workers[tid], 5)
+    assert p.context.llm_generate.await_count == 2
+    wake_prompt = p.context.tool_loop_agent.await_args.kwargs["prompt"]
+    assert "汇报内容：\n支持版本 v4.30，参考 https://a.com?x=1&amp;y=2" in wake_prompt
+    assert "&lt;report&gt;" not in wake_prompt and "未包裹的文本" not in wake_prompt
+    async with rt.db.query(
+        "SELECT result, status FROM delegated_tasks WHERE id=?", (tid,)
+    ) as cur:
+        result_text, status = await cur.fetchone()
+    assert result_text == "支持版本 v4.30，参考 https://a.com?x=1&y=2"
+    assert status == "delivered"

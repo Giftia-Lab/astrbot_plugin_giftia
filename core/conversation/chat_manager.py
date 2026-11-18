@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 from aiocqhttp import CQHttp
 
@@ -1356,16 +1356,19 @@ class ChatManager:
                 current.append(QueuedMessage(event, msg, True, time.monotonic(), 0))
         if source_ids and not current:
             return False
-        summary = json.dumps(
-            {
-                "task_id": task["id"],
-                "instruction": task["instruction"],
-                "result": truncate_message_content(
-                    task["result"],
-                    getattr(self.plugin, "reply_message_truncate_limit", 1500),
-                ),
-            },
-            ensure_ascii=False,
+        base_limit = getattr(self.plugin, "reply_message_truncate_limit", 1500)
+        if base_limit is None:
+            base_limit = 1500
+        report_limit = 0 if base_limit <= 0 else max(int(base_limit), 6000)
+        report = truncate_message_content(task["result"], report_limit)
+        logger.info(
+            "[Giftia Subagent] 唤醒主人格投递汇报: task_id=%s, revision=%s, bot=%s, session=%s, result_len=%s, delivered_len=%s",
+            task["id"],
+            task["revision"],
+            bot_name,
+            session,
+            len(task["result"] or ""),
+            len(report),
         )
         recent = await self.plugin.data_cache.get_recent_message(
             bot_name, session, self.plugin.msg_number
@@ -1379,8 +1382,11 @@ class ChatManager:
             None,
             [],
             None,
-            delegation_result="后台子任务已结束。请结合原问题、补充要求和最新会话回复。\n"
-            + escape(summary),
+            delegation_result=(
+                f"后台子任务 #{task['id']} 已结束。请结合原问题、补充要求和最新会话回复。\n"
+                f"委派目标：{escape(task['instruction'])}\n"
+                f"汇报内容：\n{escape(report)}"
+            ),
         )
         if completed:
             await self.plugin.data_cache.add_message(
@@ -1393,7 +1399,12 @@ class ChatManager:
                     group_or_user_id=session,
                     role="operation_log",
                     time=datetime.now().isoformat(),
-                    content=f"<subagent_result>{escape(summary)}</subagent_result>",
+                    content=(
+                        f"<subagent_result task_id={quoteattr(str(task['id']))} "
+                        f"instruction={quoteattr(task['instruction'])}>\n"
+                        f"{escape(report)}\n"
+                        "</subagent_result>"
+                    ),
                 ),
             )
         return completed

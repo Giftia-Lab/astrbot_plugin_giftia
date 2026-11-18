@@ -29,30 +29,41 @@ def test_optional_session_completion_provider_round_trip(tmp_path, value, expect
 
 
 @pytest.mark.asyncio
-async def test_bot_api_preserves_and_clears_subagent_and_tool_history_settings(
+async def test_bot_api_preserves_and_clears_subagent_settings_and_drops_call_only_tools(
     tmp_path, monkeypatch
 ):
     manager = BotConfigManager.__new__(BotConfigManager)
     manager.config_file = tmp_path / "bots_config.json"
-    # Simulate the previous format with a delegated tool but no worker model override.
+    # Simulate a legacy config with a retired call_only_tools list and no worker model override.
     manager.config_file.write_text(
-        json.dumps([{"name": "bot", "llm_reply_conf": {"subagent_tools": ["lookup"]}}])
+        json.dumps(
+            [
+                {
+                    "name": "bot",
+                    "llm_reply_conf": {
+                        "subagent_tools": ["lookup"],
+                        "call_only_tools": ["direct"],
+                    },
+                }
+            ]
+        )
     )
+    assert "call_only_tools" not in DEFAULT_BOT_CONFIG["llm_reply_conf"]
     saved = manager.load_bots()[0]["llm_reply_conf"]
     assert saved["subagent_tools"] == ["lookup"]
-    assert saved["subagent_provider_ids"] == saved["call_only_tools"] == []
+    assert saved["subagent_provider_ids"] == []
+    assert "call_only_tools" not in saved
     api = BotApi(SimpleNamespace(bot_config_manager=manager, sync_bot_maps=Mock()))
-    for changes, expected_providers, expected_tools in (
+    for changes, expected_providers in (
         (
             {
                 "subagent_provider_ids": [" worker-b ", "worker-a", "worker-b", None],
-                "call_only_tools": ["direct", "", "delegate_task", " direct "],
+                "call_only_tools": ["direct"],
             },
             ["worker-b", "worker-a"],
-            ["direct"],
         ),
-        ({"provider_ids": ["main"]}, ["worker-b", "worker-a"], ["direct"]),
-        ({"subagent_provider_ids": [], "call_only_tools": []}, [], []),
+        ({"provider_ids": ["main"]}, ["worker-b", "worker-a"]),
+        ({"subagent_provider_ids": []}, []),
     ):
         monkeypatch.setattr(
             bot_api_module,
@@ -64,8 +75,8 @@ async def test_bot_api_preserves_and_clears_subagent_and_tool_history_settings(
         assert (await api.save_bot()).status_code == 200
         saved = manager.load_bots()[0]["llm_reply_conf"]
         assert saved["subagent_provider_ids"] == expected_providers
-        assert saved["call_only_tools"] == expected_tools
         assert saved["subagent_tools"] == ["lookup"]
+        assert "call_only_tools" not in saved
 
 
 @pytest.mark.asyncio

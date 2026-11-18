@@ -19,13 +19,100 @@ except ModuleNotFoundError as exc:
     from astrbot.core.astr_agent_runtime.tool_executor import FunctionToolExecutor
 
 from ..llm.native_tools import NATIVE_CONTEXT_KEY
-from ..llm.tool_history import tool_value
 from ..utils.schemas import MessageData
 
 
 class ToolExecutor:
     def __init__(self, plugin):
         self.plugin = plugin
+
+    async def _record_operation_log(
+        self,
+        event: AstrMessageEvent,
+        bot_name: str,
+        nickname: str,
+        group_or_user_id: str,
+        message_id: str,
+        content: str,
+    ) -> None:
+        """Persist one call-only tool or subagent receipt into conversation history."""
+        await self.plugin.data_cache.add_message(
+            bot_name,
+            group_or_user_id,
+            MessageData(
+                nickname=nickname,
+                user_id=event.get_self_id(),
+                group_or_user_id=group_or_user_id,
+                time=datetime.now().isoformat(),
+                message_id=message_id,
+                content=content,
+                is_recalled=False,
+                media_id_list=[],
+                role="operation_log",
+            ),
+        )
+
+    async def execute_delegation(
+        self,
+        event: AstrMessageEvent,
+        bot_name: str,
+        nickname: str,
+        group_or_user_id: str,
+        task_args: dict,
+        tool_context: dict | None = None,
+    ) -> dict:
+        """Submit or extend a background subagent task from a <sub_agent> tag."""
+        result = []
+        delegated = None
+        waiting = False
+        failed = False
+        interrupted = None
+        instruction = str((task_args or {}).get("instruction") or "").strip()
+        try:
+            if not (tool_context or {}).get("delegation_providers") or tool_context.get(
+                "delegation_delivery"
+            ):
+                raise ValueError("当前回复不接受新的后台委派")
+            delegated, waiting = await self.plugin.delegations.submit(
+                event, bot_name, task_args or {}, tool_context
+            )
+            result.append(
+                f"已受理子任务 {delegated}" if waiting else f"子任务 {delegated} 已结束"
+            )
+        except asyncio.CancelledError as exc:
+            interrupted = exc
+        except Exception as e:
+            failed = True
+            logger.error(f"Error executing subagent delegation: {e}", exc_info=True)
+            result.append(f"子任务委派失败: {e}")
+
+        tool_output = "\n".join(result)
+        status = (
+            "interrupted"
+            if interrupted is not None
+            else "failed"
+            if failed
+            else "finished"
+        )
+        if delegated is not None:
+            message_id = f"delegate_{delegated}_{uuid.uuid4().hex}"
+            content = (
+                f"<sub_agent task_id={quoteattr(str(delegated))} "
+                f"status={quoteattr(status)}>{escape(instruction)}</sub_agent>"
+            )
+        else:
+            message_id = f"subagent_{uuid.uuid4().hex}_{status}"
+            content = f"<sub_agent status={quoteattr(status)}/>"
+        await self._record_operation_log(
+            event, bot_name, nickname, group_or_user_id, message_id, content
+        )
+        if interrupted is not None:
+            raise interrupted
+        receipt = {"name": "sub_agent", "results": tool_output}
+        if delegated is not None:
+            receipt["delegated"] = delegated
+            receipt["waiting"] = waiting
+        return receipt
 
     async def execute_tool(
         self,
@@ -52,42 +139,15 @@ class ToolExecutor:
             包含执行状态和文本输出的工具执行结果字典，供下一轮 LLM 循环消费。
         """
         result = []
-        raw_outputs = []
-        delegated = None
-        waiting = False
         failed = False
         interrupted = None
         clean_tool_name = tool_name.rsplit(":", 1)[-1]
-        call_only_tools = (
-            (getattr(self.plugin, "bot_map", {}) or {})
-            .get(bot_name, {})
-            .get("llm_reply_conf", {})
-            .get("call_only_tools", [])
-        )
         log_name = tool_name
-        include_details = tool_name == "delegate_task" or not (
-            tool_name in call_only_tools or clean_tool_name in call_only_tools
-        )
         try:
-            if tool_name == "delegate_task":
-                if not (tool_context or {}).get(
-                    "delegation_providers"
-                ) or tool_context.get("delegation_delivery"):
-                    raise ValueError("当前回复不接受新的后台委派")
-                delegated, waiting = await self.plugin.delegations.submit(
-                    event, bot_name, tool_args, tool_context
-                )
-                result.append(
-                    f"已受理子任务 {delegated}"
-                    if waiting
-                    else f"子任务 {delegated} 已结束"
-                )
-                tool = None
-            elif getattr(self.plugin, "delegations", None) is not None:
+            if getattr(self.plugin, "delegations", None) is not None:
                 tools, _ = self.plugin.delegations.tool_sets(bot_name)
                 name = tool_name if tools.get_tool(tool_name) else clean_tool_name
                 log_name = name
-                include_details = name not in call_only_tools
                 allowed = (tool_context or {}).get("xml_tools")
                 if allowed is not None and name not in allowed:
                     raise ValueError("工具不在主人格当前可用范围内")
@@ -97,13 +157,12 @@ class ToolExecutor:
                 tool = tool_manager.get_func(clean_tool_name) or tool_manager.get_func(
                     tool_name
                 )
-            if tool is None and delegated is None:
+            if tool is None:
                 failed = True
                 logger.error(f"[Giftia] {bot_name} Tool not found: {tool_name}")
                 result.append("工具不存在")
-            elif tool is not None:
+            else:
                 log_name = tool.name
-                include_details = log_name not in call_only_tools
                 run_context = AgentContextWrapper(
                     context=AstrAgentContext(
                         context=self.plugin.context,
@@ -121,8 +180,6 @@ class ToolExecutor:
                 async for tool_result in FunctionToolExecutor.execute(
                     tool, run_context, **tool_args
                 ):
-                    if include_details:
-                        raw_outputs.append(tool_value(tool_result))
                     if isinstance(tool_result, str):
                         result.append(tool_result)
                     elif isinstance(tool_result, mcp.types.CallToolResult):
@@ -156,45 +213,11 @@ class ToolExecutor:
             if failed
             else "finished"
         )
-        message_id = (
-            f"delegate_{delegated}_{uuid.uuid4().hex}" if delegated is not None else ""
-        )
-        if include_details:
-            record = (
-                json.dumps(raw_outputs, ensure_ascii=False, default=str)
-                if raw_outputs
-                else tool_output
-            )
-            if raw_outputs and failed:
-                record += "\n" + tool_output
-            content = (
-                f"<tool_call name={quoteattr(tool_name)} args={quoteattr(json.dumps(tool_args, ensure_ascii=False))} "
-                f"status={quoteattr(status)}>\n{escape(record)}\n</tool_call>"
-            )
-        else:
-            content = (
-                f"<tool_call name={quoteattr(log_name)} status={quoteattr(status)}/>"
-            )
-            message_id = f"tool_{uuid.uuid4().hex}_{status}"
-        await self.plugin.data_cache.add_message(
-            bot_name,
-            group_or_user_id,
-            MessageData(
-                nickname=nickname,
-                user_id=event.get_self_id(),
-                group_or_user_id=group_or_user_id,
-                time=datetime.now().isoformat(),
-                message_id=message_id,
-                content=content,
-                is_recalled=False,
-                media_id_list=[],
-                role="operation_log",
-            ),
+        message_id = f"tool_{uuid.uuid4().hex}_{status}"
+        content = f"<tool_call name={quoteattr(log_name)} status={quoteattr(status)}/>"
+        await self._record_operation_log(
+            event, bot_name, nickname, group_or_user_id, message_id, content
         )
         if interrupted is not None:
             raise interrupted
-        receipt = {"name": tool_name, "results": tool_output}
-        if delegated is not None:
-            receipt["delegated"] = delegated
-            receipt["waiting"] = waiting
-        return receipt
+        return {"name": tool_name, "results": tool_output}

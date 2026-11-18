@@ -2,13 +2,12 @@
 
 import asyncio
 import inspect
-import json
 import uuid
 from contextlib import aclosing
 from copy import copy
 from datetime import datetime
 from functools import wraps
-from xml.sax.saxutils import escape, quoteattr
+from xml.sax.saxutils import quoteattr
 
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.tool import FunctionTool, ToolSet
@@ -17,39 +16,60 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 from ..utils.schemas import MessageData
 
 
-def tool_value(value):
-    """Return the complete SDK value in a JSON-serializable form."""
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", exclude_none=True)
-    return value
-
-
 class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
-    """Keep start and completion records paired even when the native loop raises."""
+    """Fold a reply turn's native tool calls into one deduplicated call-only log."""
 
     def __init__(self, plugin, event, bot_name, session):
         self.cache = getattr(plugin, "data_cache", None)
         bot = (getattr(plugin, "bot_map", {}) or {}).get(bot_name, {})
         self.nickname = bot.get("nickname") or bot_name
-        self.call_only_tools = frozenset(
-            bot.get("llm_reply_conf", {}).get("call_only_tools", [])
-        )
         self.event, self.bot_name, self.session = event, bot_name, session
-        self.called_tools = []
+        self.called_tools: list[str] = []
+        self.tool_statuses: dict[str, str] = {}
+        self.pending = None
+        self._recorded = False
+        self._run_id = uuid.uuid4().hex
+
+    def _finalize_pending(self, status: str) -> None:
+        if self.pending is None:
+            return
+        self.tool_statuses[self.pending["name"]] = status
         self.pending = None
 
-    async def _record(self, status, body):
-        if self.cache is None or not self.bot_name:
+    async def on_tool_start(self, run_context, tool, tool_args):
+        self.called_tools.append(tool.name)
+        if self.pending is not None:
+            self._finalize_pending("failed" if self.pending["error"] else "interrupted")
+        self.pending = {"name": tool.name, "error": False}
+        self.tool_statuses.setdefault(tool.name, "started")
+
+    async def on_tool_end(self, run_context, tool, tool_args, tool_result):
+        if self.pending is None:
             return
-        call_id, name = self.pending["id"], self.pending["name"]
-        attributes = f"name={quoteattr(name)} status={quoteattr(status)}"
-        if self.pending["include_details"]:
-            payload = escape(json.dumps(body, ensure_ascii=False, default=str))
-            content = (
-                f"<tool_call id={quoteattr(call_id)} {attributes}>{payload}</tool_call>"
+        failed = self.pending["error"] or bool(getattr(tool_result, "isError", False))
+        self._finalize_pending("failed" if failed else "finished")
+
+    async def finish(self, error=None, *, tools_called=None):
+        """Record one deduplicated call-only operation_log for the finished turn."""
+        if self.pending is not None:
+            self._finalize_pending(
+                "failed" if self.pending["error"] or error else "interrupted"
             )
-        else:
-            content = f"<tool_call {attributes}/>"
+        for name in tools_called or ():
+            if name and name not in self.tool_statuses:
+                self.tool_statuses[name] = "failed" if error else "finished"
+        if (
+            self._recorded
+            or self.cache is None
+            or not self.bot_name
+            or not self.tool_statuses
+        ):
+            return
+        self._recorded = True
+        content = "\n".join(
+            f"<tool_call name={quoteattr(name)} status={quoteattr(status)}/>"
+            for name, status in self.tool_statuses.items()
+        )
         await self.cache.add_message(
             self.bot_name,
             self.session,
@@ -58,59 +78,20 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
                 user_id=str(self.event.get_self_id()),
                 group_or_user_id=self.session,
                 time=datetime.now().isoformat(),
-                message_id=f"tool_{call_id}_{status}",
+                message_id=f"tool_{self._run_id}",
                 role="operation_log",
                 content=content,
             ),
         )
 
-    async def on_tool_start(self, run_context, tool, tool_args):
-        self.called_tools.append(tool.name)
-        await self.finish()
-        self.pending = {
-            "id": uuid.uuid4().hex,
-            "name": tool.name,
-            "include_details": tool.name not in self.call_only_tools,
-            "outputs": [],
-            "error": "",
-        }
-        await self._record("started", {"arguments": tool_args or {}})
-
-    async def on_tool_end(self, run_context, tool, tool_args, tool_result):
-        if self.pending is None:
-            return
-        outputs = self.pending["outputs"]
-        if self.pending["include_details"] and not outputs:
-            outputs.append(tool_value(tool_result))
-        failure = self.pending["error"] or (
-            "工具返回执行错误" if getattr(tool_result, "isError", False) else ""
-        )
-        await self._record(
-            "failed" if failure else "finished",
-            {"outputs": outputs, "error": failure},
-        )
-        self.pending = None
-
-    async def finish(self, error=None):
-        """Close a start whose SDK end hook was skipped by an error or cancellation."""
-        if self.pending is not None:
-            detail = self.pending["error"] or str(
-                error or "工具执行中断，未收到完成回执"
-            )
-            await self._record(
-                "failed" if self.pending["error"] or error else "interrupted",
-                {"outputs": self.pending["outputs"], "error": detail},
-            )
-            self.pending = None
-
     def observe(self, tools):
-        """Observe yielded chunks without changing the registered tools or SDK dispatch.
+        """Observe tool execution outcomes without recording arguments or outputs.
 
         Args:
             tools: Permission-filtered native tools of this attempt.
 
         Returns:
-            Per-attempt tool copies. The SDK end hook exposes only the last yield.
+            Per-attempt tool copies whose failure states are tracked.
         """
         if self.cache is None:
             return tools
@@ -137,9 +118,9 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
             call = self.pending
             try:
                 outcome = function(*args, **kwargs)
-            except Exception as exc:
+            except Exception:
                 if call is not None:
-                    call["error"] = str(exc) or type(exc).__name__
+                    call["error"] = True
                 raise
             if inspect.isasyncgen(outcome):
 
@@ -147,15 +128,12 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
                     try:
                         async with aclosing(outcome):
                             async for part in outcome:
-                                if call is not None:
-                                    if call["include_details"]:
-                                        call["outputs"].append(tool_value(part))
-                                    if getattr(part, "isError", False):
-                                        call["error"] = "工具返回执行错误"
+                                if call is not None and getattr(part, "isError", False):
+                                    call["error"] = True
                                 yield part
-                    except (Exception, asyncio.CancelledError) as exc:
+                    except (Exception, asyncio.CancelledError):
                         if call is not None:
-                            call["error"] = str(exc) or type(exc).__name__
+                            call["error"] = True
                         raise
 
                 return stream()
@@ -163,17 +141,10 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
 
                 async def result():
                     try:
-                        value = await outcome
-                        if (
-                            call is not None
-                            and call["include_details"]
-                            and hasattr(value, "chain")
-                        ):
-                            call["outputs"].append(tool_value(value))
-                        return value
-                    except (Exception, asyncio.CancelledError) as exc:
+                        return await outcome
+                    except (Exception, asyncio.CancelledError):
                         if call is not None:
-                            call["error"] = str(exc) or type(exc).__name__
+                            call["error"] = True
                         raise
 
                 return result()

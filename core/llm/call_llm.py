@@ -454,11 +454,12 @@ class CallLLM:
                     f"- {t.name}: {t.description}" for t in delegated.tools
                 )
                 actual_system_prompt += (
-                    "\n\n# 后台委派\n以下工具由子 Agent 执行。用 XML 工具 "
-                    '<tool_call name="delegate_task">{"instruction":"目标、必要背景和需要的依据"}</tool_call> '
-                    "派发任务，可以在同一份 XML 里并列输出进度消息。任务完成后系统会唤醒你。"
-                    "查看当前会话的子任务状态，补充同一任务时在参数中加入 task_id。"
-                    "用户仅问进度时可以根据状态回答。\n" + catalog
+                    "\n\n## 子 Agent 委派\n"
+                    "以下能力由后台子 Agent 独立执行，完成后系统会带着汇报唤醒你；"
+                    "用户仅问进度时可根据 `<subagent_tasks>` 中的状态回答。\n"
+                    "- **新建任务**：`<sub_agent>目标、必要背景和需要的依据</sub_agent>`（可与 `<message>` 并列输出进度提示）\n"
+                    '- **补充要求**：`<sub_agent task_id="任务ID">补充要求</sub_agent>`\n'
+                    "子 Agent 可用能力：\n" + catalog
                 )
             if tool_context is not None:
                 tool_context["xml_tools"] = [t.name for t in tools_set.tools]
@@ -550,7 +551,14 @@ class CallLLM:
                     except Exception as exc:
                         error = exc
                     finally:
-                        await reply_hooks.finish(error)
+                        await reply_hooks.finish(
+                            error,
+                            tools_called=(
+                                getattr(llm_resp, "tools_call_name", None)
+                                if use_native_tools
+                                else None
+                            ),
+                        )
 
                     request_failed = error is not None and not isinstance(
                         error, EmptyModelOutputError

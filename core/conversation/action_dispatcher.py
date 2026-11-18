@@ -225,6 +225,7 @@ class ActionDispatcher:
             ("ban", llm_result.ban),
             ("kick", llm_result.kick),
             ("tool_call", llm_result.tools_to_call),
+            ("sub_agent", llm_result.sub_agent_tasks),
         ):
             order.extend(
                 (item_type, index)
@@ -232,6 +233,56 @@ class ActionDispatcher:
                 if (item_type, index) not in tracked
             )
         return order
+
+    async def _dispatch_tool_or_subagent(
+        self,
+        event: AstrMessageEvent,
+        bot_name: str,
+        nickname: str,
+        group_or_user_id: str,
+        llm_result: XmlLlmResult,
+        item_type: str,
+        item_index: int,
+        sent_index: int,
+    ) -> bool:
+        """Execute one ordered XML function tool call or background subagent request."""
+        if item_type == "tool_call":
+            items = llm_result.tools_to_call
+            if item_index < 0 or item_index >= len(items):
+                return False
+            if sent_index > 0:
+                await asyncio.sleep(
+                    random.randint(
+                        self.plugin.min_reply_interval,
+                        self.plugin.max_reply_interval,
+                    )
+                )
+            tool_name, tool_args = items[item_index]
+            receipt = await self.tool_executor.execute_tool(
+                event,
+                bot_name,
+                nickname,
+                group_or_user_id,
+                tool_name,
+                tool_args,
+                tool_context=llm_result.tool_context or None,
+            )
+        elif item_type == "sub_agent":
+            items = llm_result.sub_agent_tasks
+            if item_index < 0 or item_index >= len(items):
+                return False
+            receipt = await self.tool_executor.execute_delegation(
+                event,
+                bot_name,
+                nickname,
+                group_or_user_id,
+                items[item_index],
+                tool_context=llm_result.tool_context or None,
+            )
+        else:
+            return False
+        llm_result.xml_tool_results.append(receipt)
+        return True
 
     async def build_tts_message_chain(
         self,
@@ -548,29 +599,21 @@ class ActionDispatcher:
                     logger.debug(f"[Giftia] {action_name} is unavailable [{err_msg}]")
                 sent_index += 1
                 continue
-            elif item_type == "tool_call":
-                if item_index < 0 or item_index >= len(llm_result.tools_to_call):
-                    continue
-                if sent_index > 0:
-                    await asyncio.sleep(
-                        random.randint(
-                            self.plugin.min_reply_interval,
-                            self.plugin.max_reply_interval,
-                        )
-                    )
-                tool_name, tool_args = llm_result.tools_to_call[item_index]
-                llm_result.xml_tool_results.append(
-                    await self.tool_executor.execute_tool(
+            elif item_type in ("tool_call", "sub_agent"):
+                if (
+                    await self._dispatch_tool_or_subagent(
                         event,
                         bot_name,
                         nickname,
                         group_or_user_id,
-                        tool_name,
-                        tool_args,
-                        tool_context=llm_result.tool_context or None,
+                        llm_result,
+                        item_type,
+                        item_index,
+                        sent_index,
                     )
-                )
-                sent_index += 1
+                    and item_type == "tool_call"
+                ):
+                    sent_index += 1
                 continue
             else:
                 continue
@@ -701,29 +744,21 @@ class ActionDispatcher:
                 )
                 if not msg_chain:
                     continue
-            elif item_type == "tool_call":
-                if item_index < 0 or item_index >= len(llm_result.tools_to_call):
-                    continue
-                if sent_index > 0:
-                    await asyncio.sleep(
-                        random.randint(
-                            self.plugin.min_reply_interval,
-                            self.plugin.max_reply_interval,
-                        )
-                    )
-                tool_name, tool_args = llm_result.tools_to_call[item_index]
-                llm_result.xml_tool_results.append(
-                    await self.tool_executor.execute_tool(
+            elif item_type in ("tool_call", "sub_agent"):
+                if (
+                    await self._dispatch_tool_or_subagent(
                         event,
                         bot_name,
                         nickname,
                         group_or_user_id,
-                        tool_name,
-                        tool_args,
-                        tool_context=llm_result.tool_context or None,
+                        llm_result,
+                        item_type,
+                        item_index,
+                        sent_index,
                     )
-                )
-                sent_index += 1
+                    and item_type == "tool_call"
+                ):
+                    sent_index += 1
                 continue
             else:
                 continue

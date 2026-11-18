@@ -30,6 +30,7 @@ def runtime():
         "backup",
         "review",
         "completion",
+        "subagent",
         "media",
         "inspect",
         "summary",
@@ -66,6 +67,7 @@ def runtime():
                     "provider_ids": ["reply", "shared", "missing"],
                     "invalid_reply_fallback_provider_ids": ["backup"],
                     "review_provider_id": "review",
+                    "subagent_provider_ids": ["subagent", "shared"],
                 },
             }
         },
@@ -112,6 +114,7 @@ async def test_inventory_deduplicates_ids_covers_all_roles_and_omits_credentials
         "backup",
         "review",
         "completion",
+        "subagent",
         "media",
         "inspect",
         "summary",
@@ -120,12 +123,15 @@ async def test_inventory_deduplicates_ids_covers_all_roles_and_omits_credentials
     assert set(rows["shared"]["uses"]) == {
         "bot · 前置决策",
         "bot · 正式回复/转发转述",
+        "bot · 子 Agent",
         "媒体转述",
         "记忆/好感度归纳",
     }
     assert rows["missing"]["registered"] is False
     assert rows["reply"]["model"] == "model-reply"
+    assert rows["reply"]["uses"] == ["bot · 正式回复/转发转述"]
     assert rows["completion"]["uses"] == ["bot · 会话防抖判断"]
+    assert rows["subagent"]["uses"] == ["bot · 子 Agent"]
     assert "sk-secret" not in response.text
     runtime.plugin.context.llm_generate.assert_not_awaited()
 
@@ -237,16 +243,87 @@ async def test_inventory_includes_models_configured_for_disabled_bots(runtime):
             {
                 "name": "disabled",
                 "enabled": False,
-                "llm_reply_conf": {"provider_ids": ["reply"]},
+                "llm_reply_conf": {
+                    "provider_ids": ["reply"],
+                    "subagent_provider_ids": ["subagent"],
+                },
             }
         ]
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(runtime.app), base_url="http://test"
     ) as client:
-        rows = (await client.get("/models/health")).json()["data"]["models"]
-    reply = next(row for row in rows if row["provider_id"] == "reply")
-    assert reply["uses"] == ["disabled（已停用） · 正式回复/转发转述"]
+        rows = {
+            row["provider_id"]: row
+            for row in (await client.get("/models/health")).json()["data"]["models"]
+        }
+    assert rows["reply"]["uses"] == ["disabled（已停用） · 正式回复/转发转述"]
+    assert rows["subagent"]["uses"] == ["disabled（已停用） · 子 Agent"]
+
+
+@pytest.mark.asyncio
+async def test_inventory_marks_inherited_subagent_providers_only_when_delegation_enabled(
+    runtime,
+):
+    runtime.plugin.bot_config_manager = SimpleNamespace(
+        bots=[
+            {
+                "name": "inherited",
+                "enabled": True,
+                "llm_reply_conf": {
+                    "provider_ids": ["reply", "shared"],
+                    "subagent_provider_ids": [],
+                    "subagent_tools": ["lookup"],
+                },
+            },
+            {
+                "name": "disabled-delegation",
+                "enabled": True,
+                "llm_reply_conf": {
+                    "provider_ids": ["backup"],
+                    "subagent_provider_ids": [],
+                    "subagent_tools": [],
+                },
+            },
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
+        rows = {
+            row["provider_id"]: row
+            for row in (await client.get("/models/health")).json()["data"]["models"]
+        }
+    assert rows["reply"]["uses"] == [
+        "inherited · 正式回复/转发转述",
+        "inherited · 子 Agent",
+    ]
+    assert set(rows["shared"]["uses"]) >= {
+        "inherited · 正式回复/转发转述",
+        "inherited · 子 Agent",
+    }
+    assert rows["backup"]["uses"] == ["disabled-delegation · 正式回复/转发转述"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_only_provider_supports_manual_test_and_toggle(runtime):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
+        tested = await client.post("/models/test", json={"provider_id": "subagent"})
+        disabled = await client.post(
+            "/models/settings", json={"provider_id": "subagent", "enabled": False}
+        )
+    assert tested.status_code == 200
+    assert tested.json()["status"] == "success"
+    assert tested.json()["data"]["status"] == "healthy"
+    assert disabled.status_code == 200
+    subagent = next(
+        row
+        for row in disabled.json()["data"]["models"]
+        if row["provider_id"] == "subagent"
+    )
+    assert subagent["status"] == "disabled" and subagent["enabled"] is False
 
 
 @pytest.mark.asyncio

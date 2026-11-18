@@ -224,6 +224,7 @@ FLAT_CLOSABLE_TAGS = [
     "summary_user_profile",
     "update_relation",
     "tool_call",
+    "sub_agent",
     "memo",
     "add_sticker",
     "tts",
@@ -312,3 +313,5 @@ class XmlLlmResult:
     user_block_actions: list[tuple[str, str]] = field(default_factory=list)
     # Trusted frozen input for silence, or the last successfully recorded output.
     thought_anchor: MessageData | None = None
+    # Background subagent delegation requests parsed from <sub_agent> tags.
+    sub_agent_tasks: list[dict] = field(default_factory=list)

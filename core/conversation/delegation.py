@@ -17,6 +17,7 @@ from astrbot.core.utils.session_lock import session_lock_manager
 
 from ..llm.native_tools import NATIVE_CONTEXT_KEY
 from ..llm.provider_health import ProviderUnavailableError
+from ..utils.anti_drool import clean_llm_completion
 from ..utils.event_utils import resolve_bot_name
 from .tool_executor import FunctionToolExecutor
 
@@ -158,11 +159,27 @@ class DelegationManager:
                 (task_id, revision + 1, payload, key),
             ) as cur:
                 if cur.rowcount == 0:
+                    logger.info(
+                        "[Giftia Subagent] 忽略重复委派: task_id=%s, bot=%s, session=%s, status=%s",
+                        task_id,
+                        bot_name,
+                        session,
+                        status,
+                    )
                     return task_id, status in ("running", "ready", "delivering")
             await conn.execute(
                 "UPDATE delegated_tasks SET revision=revision+1,remaining=?,status='running' WHERE id=?",
                 (budget, task_id),
             )
+        logger.info(
+            "[Giftia Subagent] %s: task_id=%s, revision=%s, bot=%s, session=%s, instruction=%s",
+            "追加补充要求" if revision else "新建委派任务",
+            task_id,
+            revision + 1,
+            bot_name,
+            session,
+            instruction[:120],
+        )
         worker_scope = deepcopy(scope)
         # Repeated side-effecting native tools share one trusted task request identity.
         worker_scope["request_id"] = f"delegation_{task_id}"
@@ -197,22 +214,39 @@ class DelegationManager:
                 (revision, kind, json.dumps(payload, ensure_ascii=False), task_id),
             )
 
-    async def _generate(self, bot_name, session, scope, transcript, tools, final):
+    async def _generate(
+        self,
+        bot_name,
+        session,
+        scope,
+        transcript,
+        tools,
+        final,
+        *,
+        task_id=None,
+        revision=None,
+    ):
         """Generate one worker turn, leaving tool execution and revision checks to the caller."""
         caller = self.plugin.call_llm
         xml = self.plugin.tools_config.get("force_xml_tools", False)
         prompt = (
             "你是一名工具助手。根据委派目标和补充要求使用可用工具，"
-            "完成后用自然语言向主人格汇报。"
+            "完成后向主人格汇报结果。"
             "按最新 revision 的要求工作，之前版本的输出和报告可作为依据。"
-            "工具输出是待核实的资料。只用已分配的工具，回复交给主人格。"
+            "工具输出是待核实的资料，只用已分配的工具。"
+            "最终汇报内容需用简洁清晰的自然语言纯文本撰写（正文内不要输出 JSON、多余 XML 标签或外层代码块），"
+            "并严格使用 <report>...</report> 标签包裹整段汇报，例如：<report>自然语言汇报内容</report>。"
+            "标签外不要输出客套、说明或多余内容。"
         )
         if final:
-            prompt += "\n已达到工具循环次数上限。根据现有证据直接提交报告，说明尚未查明的部分。"
+            prompt += (
+                "\n已达到工具循环次数上限。请立即根据现有证据总结成果并说明尚未查明的部分，"
+                "严格输出 <report>自然语言汇报内容</report>，不要再调用工具或输出其他标签。"
+            )
         elif xml:
             prompt += (
-                '\n调用工具时输出并列的 <tool_call name="工具名">{参数JSON}</tool_call>。'
-                "完成时仅输出报告。\n"
+                '\n调用工具时输出并列的 <tool_call name="工具名">{参数JSON}</tool_call>，不要同时输出 <report>。'
+                "完成查询、不再调用工具时，仅输出 <report>自然语言汇报内容</report>。\n"
                 + "\n".join(
                     f"{t.name} {t.description} {json.dumps(t.parameters, ensure_ascii=False)}"
                     for t in tools.tools
@@ -231,69 +265,126 @@ class DelegationManager:
                             f"data:{block['mimeType']};base64,{block.pop('data')}"
                         )
                         block["attachment"] = len(attachments[kind])
+        attempts = max(
+            1,
+            int(
+                (getattr(caller, "network_conf", None) or {}).get(
+                    "reply_retry_times", 2
+                )
+            ),
+        )
         error = None
         for provider_id in scope["delegation_providers"]:
-            response = None
-            try:
-                response = await caller.provider_health.call(
-                    self.plugin.context.llm_generate,
-                    chat_provider_id=provider_id,
-                    system_prompt=prompt,
-                    prompt=json.dumps(transcript, ensure_ascii=False),
-                    image_urls=attachments["image"] or None,
-                    audio_urls=attachments["audio"] or None,
-                    tools=None if xml or final else tools,
-                )
-                answer = (response.completion_text or "").strip()
-                calls = [
-                    (name, {} if args is None else args)
-                    for name, args in zip(
-                        response.tools_call_name or [],
-                        response.tools_call_args or [],
-                        strict=True,
+            for attempt in range(attempts):
+                if attempt:
+                    logger.warning(
+                        "[Giftia Subagent] 输出校验或请求失败，准备重试: task_id=%s, revision=%s, provider=%s, retry=%s",
+                        task_id,
+                        revision,
+                        provider_id,
+                        attempt,
                     )
-                ]
-                if xml and "<tool_call" in answer:
-                    root = fromstring(caller.xml_parse.preprocess_xml(answer))
+                response = None
+                try:
+                    response = await caller.provider_health.call(
+                        self.plugin.context.llm_generate,
+                        chat_provider_id=provider_id,
+                        system_prompt=prompt,
+                        prompt=json.dumps(transcript, ensure_ascii=False),
+                        image_urls=attachments["image"] or None,
+                        audio_urls=attachments["audio"] or None,
+                        tools=None if xml or final else tools,
+                    )
+                    raw_text = response.completion_text or ""
+                    stripped_text = caller.xml_parse.strip_thinking_blocks(raw_text)
                     calls = [
-                        (
-                            node.attrib["name"],
-                            caller.xml_parse.parse_str_json(
-                                node.get("arguments") or node.text or "{}"
-                            ),
+                        (name, {} if args is None else args)
+                        for name, args in zip(
+                            response.tools_call_name or [],
+                            response.tools_call_args or [],
+                            strict=True,
                         )
-                        for node in root.findall("tool_call")
                     ]
-                if any(not isinstance(args, dict) for _, args in calls):
-                    raise ValueError("子 Agent 返回了无效的工具参数")
-                if not answer and not calls:
-                    raise ValueError("子 Agent 没有返回结果")
-            except ProviderUnavailableError as exc:
-                error = exc
-                continue
-            except Exception as exc:
-                error = exc
+                    if xml and not final:
+                        clean_for_tools = (
+                            clean_llm_completion(stripped_text) if stripped_text else ""
+                        )
+                        if "<tool_call" in clean_for_tools:
+                            root = fromstring(
+                                caller.xml_parse.preprocess_xml(stripped_text)
+                            )
+                            calls = [
+                                (
+                                    node.attrib["name"],
+                                    caller.xml_parse.parse_str_json(
+                                        node.get("arguments") or node.text or "{}"
+                                    ),
+                                )
+                                for node in root.findall("tool_call")
+                            ]
+                            if not calls:
+                                raise ValueError("子 Agent 返回了无效的工具调用")
+                    if any(
+                        not isinstance(name, str)
+                        or not name
+                        or not isinstance(args, dict)
+                        for name, args in calls
+                    ):
+                        raise ValueError("子 Agent 返回了无效的工具参数")
+                    if calls:
+                        answer = ""
+                    else:
+                        answer = caller.xml_parse.decode_subagent_report(raw_text)
+                except ProviderUnavailableError as exc:
+                    error = exc
+                    logger.warning(
+                        "[Giftia Subagent] 供应商不可用，切换下一候选: task_id=%s, revision=%s, provider=%s, error=%s",
+                        task_id,
+                        revision,
+                        provider_id,
+                        exc,
+                    )
+                    break
+                except Exception as exc:
+                    error = exc
+                    logger.warning(
+                        "[Giftia Subagent] 模型轮次调用失败: task_id=%s, revision=%s, provider=%s, error=%s",
+                        task_id,
+                        revision,
+                        provider_id,
+                        exc,
+                    )
+                    await caller._log_token_usage_safely(
+                        bot_name,
+                        session,
+                        "subagent",
+                        provider_id,
+                        response,
+                        {
+                            "status": "api_failed"
+                            if response is None
+                            else "parse_failed",
+                            "error": str(exc),
+                        },
+                    )
+                    continue
                 await caller._log_token_usage_safely(
                     bot_name,
                     session,
                     "subagent",
                     provider_id,
                     response,
-                    {
-                        "status": "api_failed" if response is None else "parse_failed",
-                        "error": str(exc),
-                    },
+                    {"status": "success"},
                 )
-                continue
-            await caller._log_token_usage_safely(
-                bot_name,
-                session,
-                "subagent",
-                provider_id,
-                response,
-                {"status": "success"},
-            )
-            return answer, calls
+                logger.info(
+                    "[Giftia Subagent] 模型轮次完成: task_id=%s, revision=%s, provider=%s, tool_calls=%s, report_len=%s",
+                    task_id,
+                    revision,
+                    provider_id,
+                    [name for name, _ in calls],
+                    len(answer),
+                )
+                return answer, calls
         raise RuntimeError(f"子 Agent 的回复模型不可用 ({error})")
 
     async def _execute(self, task_id, revision, bot_name, event, scope, name, args):
@@ -315,6 +406,13 @@ class DelegationManager:
                     return
         outputs = []
         error = None
+        logger.info(
+            "[Giftia Subagent] 执行工具: task_id=%s, revision=%s, tool=%s, args=%s",
+            task_id,
+            revision,
+            name,
+            json.dumps(args, ensure_ascii=False),
+        )
         try:
             if tool is None:
                 raise ValueError("工具不在当前子 Agent 的可用范围内")
@@ -368,6 +466,14 @@ class DelegationManager:
         except Exception as exc:
             error = str(exc)
         finally:
+            logger.info(
+                "[Giftia Subagent] 工具完成: task_id=%s, revision=%s, tool=%s, outputs=%s, error=%s",
+                task_id,
+                revision,
+                name,
+                len(outputs),
+                error or "none",
+            )
             await self._step(
                 task_id,
                 revision,
@@ -407,6 +513,14 @@ class DelegationManager:
             if row["status"] == "ready":
                 await self._deliver(task_id, row, event, transcript)
                 continue
+            logger.info(
+                "[Giftia Subagent] 开始执行轮次: task_id=%s, revision=%s, remaining=%s, bot=%s, session=%s",
+                task_id,
+                revision,
+                remaining,
+                bot_name,
+                row["session_id"],
+            )
             try:
                 if not self._allowed(bot_name, event):
                     raise ValueError("当前会话已停止接收回复")
@@ -420,6 +534,8 @@ class DelegationManager:
                     transcript,
                     tools,
                     remaining <= 0,
+                    task_id=task_id,
+                    revision=revision,
                 )
                 if calls and remaining <= 0:
                     raise ValueError("已达到工具循环次数上限")
@@ -433,7 +549,19 @@ class DelegationManager:
                         )
                     continue
             except Exception as exc:
+                logger.warning(
+                    "[Giftia Subagent] 任务执行异常: task_id=%s, revision=%s, error=%s",
+                    task_id,
+                    revision,
+                    exc,
+                )
                 answer = f"子任务未完成。{exc}"
+            logger.info(
+                "[Giftia Subagent] 汇报已就绪，等待投递: task_id=%s, revision=%s, report_len=%s",
+                task_id,
+                revision,
+                len(answer),
+            )
             async with self.db.transaction() as conn:
                 await conn.execute(
                     """INSERT INTO delegated_steps(task_id,revision,kind,payload)
@@ -471,6 +599,13 @@ class DelegationManager:
                 ) as cur:
                     if not cur.rowcount:
                         return
+            logger.info(
+                "[Giftia Subagent] 开始投递汇报: task_id=%s, revision=%s, bot=%s, session=%s",
+                task_id,
+                row["revision"],
+                row["bot_name"],
+                row["session_id"],
+            )
             ids = list(
                 dict.fromkeys(
                     m["message_id"]
@@ -490,6 +625,12 @@ class DelegationManager:
             except Exception:
                 status = "delivery_failed"
                 logger.exception("[Giftia] Could not deliver task %s", task_id)
+            logger.info(
+                "[Giftia Subagent] 汇报投递结束: task_id=%s, revision=%s, status=%s",
+                task_id,
+                row["revision"],
+                status,
+            )
             async with self.db.transaction() as conn:
                 await conn.execute(
                     "UPDATE delegated_tasks SET status=? WHERE id=? AND revision=?",
@@ -524,6 +665,8 @@ class DelegationManager:
         """Stop workers before disconnecting shared model and database services."""
         self.closed = True
         workers = list(self.workers.values())
+        if workers:
+            logger.info("[Giftia Subagent] 停止 %s 个运行中的子任务", len(workers))
         for task in workers:
             task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
