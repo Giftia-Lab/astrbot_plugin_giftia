@@ -233,6 +233,7 @@ class DelegationManager:
                         block["attachment"] = len(attachments[kind])
         error = None
         for provider_id in scope["delegation_providers"]:
+            response = None
             try:
                 response = await caller.provider_health.call(
                     self.plugin.context.llm_generate,
@@ -243,6 +244,30 @@ class DelegationManager:
                     audio_urls=attachments["audio"] or None,
                     tools=None if xml or final else tools,
                 )
+                answer = (response.completion_text or "").strip()
+                calls = [
+                    (name, {} if args is None else args)
+                    for name, args in zip(
+                        response.tools_call_name or [],
+                        response.tools_call_args or [],
+                        strict=True,
+                    )
+                ]
+                if xml and "<tool_call" in answer:
+                    root = fromstring(caller.xml_parse.preprocess_xml(answer))
+                    calls = [
+                        (
+                            node.attrib["name"],
+                            caller.xml_parse.parse_str_json(
+                                node.get("arguments") or node.text or "{}"
+                            ),
+                        )
+                        for node in root.findall("tool_call")
+                    ]
+                if any(not isinstance(args, dict) for _, args in calls):
+                    raise ValueError("子 Agent 返回了无效的工具参数")
+                if not answer and not calls:
+                    raise ValueError("子 Agent 没有返回结果")
             except ProviderUnavailableError as exc:
                 error = exc
                 continue
@@ -253,7 +278,11 @@ class DelegationManager:
                     session,
                     "subagent",
                     provider_id,
-                    extra_info={"status": "api_failed", "error": str(exc)},
+                    response,
+                    {
+                        "status": "api_failed" if response is None else "parse_failed",
+                        "error": str(exc),
+                    },
                 )
                 continue
             await caller._log_token_usage_safely(
@@ -264,30 +293,6 @@ class DelegationManager:
                 response,
                 {"status": "success"},
             )
-            answer = (response.completion_text or "").strip()
-            calls = [
-                (name, {} if args is None else args)
-                for name, args in zip(
-                    response.tools_call_name or [],
-                    response.tools_call_args or [],
-                    strict=True,
-                )
-            ]
-            if xml and "<tool_call" in answer:
-                root = fromstring(caller.xml_parse.preprocess_xml(answer))
-                calls = [
-                    (
-                        node.attrib["name"],
-                        caller.xml_parse.parse_str_json(
-                            node.get("arguments") or node.text or "{}"
-                        ),
-                    )
-                    for node in root.findall("tool_call")
-                ]
-            if any(not isinstance(args, dict) for _, args in calls):
-                raise ValueError("子 Agent 返回了无效的工具参数")
-            if not answer and not calls:
-                raise ValueError("子 Agent 没有返回结果")
             return answer, calls
         raise RuntimeError(f"子 Agent 的回复模型不可用 ({error})")
 

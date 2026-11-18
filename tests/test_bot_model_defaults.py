@@ -29,6 +29,46 @@ def test_optional_session_completion_provider_round_trip(tmp_path, value, expect
 
 
 @pytest.mark.asyncio
+async def test_bot_api_preserves_and_clears_subagent_and_tool_history_settings(
+    tmp_path, monkeypatch
+):
+    manager = BotConfigManager.__new__(BotConfigManager)
+    manager.config_file = tmp_path / "bots_config.json"
+    # Simulate the previous format with a delegated tool but no worker model override.
+    manager.config_file.write_text(
+        json.dumps([{"name": "bot", "llm_reply_conf": {"subagent_tools": ["lookup"]}}])
+    )
+    saved = manager.load_bots()[0]["llm_reply_conf"]
+    assert saved["subagent_tools"] == ["lookup"]
+    assert saved["subagent_provider_ids"] == saved["call_only_tools"] == []
+    api = BotApi(SimpleNamespace(bot_config_manager=manager, sync_bot_maps=Mock()))
+    for changes, expected_providers, expected_tools in (
+        (
+            {
+                "subagent_provider_ids": [" worker-b ", "worker-a", "worker-b", None],
+                "call_only_tools": ["direct", "", "delegate_task", " direct "],
+            },
+            ["worker-b", "worker-a"],
+            ["direct"],
+        ),
+        ({"provider_ids": ["main"]}, ["worker-b", "worker-a"], ["direct"]),
+        ({"subagent_provider_ids": [], "call_only_tools": []}, [], []),
+    ):
+        monkeypatch.setattr(
+            bot_api_module,
+            "request",
+            SimpleNamespace(
+                json=AsyncMock(return_value={"name": "bot", "llm_reply_conf": changes})
+            ),
+        )
+        assert (await api.save_bot()).status_code == 200
+        saved = manager.load_bots()[0]["llm_reply_conf"]
+        assert saved["subagent_provider_ids"] == expected_providers
+        assert saved["call_only_tools"] == expected_tools
+        assert saved["subagent_tools"] == ["lookup"]
+
+
+@pytest.mark.asyncio
 async def test_bot_api_preserves_completion_for_old_clients_and_allows_disable(
     tmp_path, monkeypatch
 ):

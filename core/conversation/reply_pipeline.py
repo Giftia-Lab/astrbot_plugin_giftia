@@ -602,7 +602,11 @@ class ReplyPipeline:
             )
         prompt_extra = list(other_data or [])
         delegations = getattr(self.plugin, "delegations", None)
-        if delegations and delegations.active(bot_name, event.unified_msg_origin):
+        if (
+            llm_reply_conf.get("subagent_tools")
+            and delegations
+            and delegations.active(bot_name, event.unified_msg_origin)
+        ):
             active_tasks = await delegations.context(bot_name, event.unified_msg_origin)
             if active_tasks:
                 prompt_extra.append(active_tasks)
@@ -674,9 +678,11 @@ class ReplyPipeline:
         )
         if provider_selection_mode == "random":
             random.shuffle(provider_ids)
-        if llm_reply_conf.get("subagent_tools"):
-            tool_context["delegation_providers"] = provider_ids
-            tool_context["delegation_delivery"] = delegation_delivery
+        tool_context["delegation_delivery"] = delegation_delivery
+        if llm_reply_conf.get("subagent_tools") and not delegation_delivery:
+            tool_context["delegation_providers"] = (
+                llm_reply_conf.get("subagent_provider_ids") or provider_ids
+            )
             tool_context["delegation_inputs"] = [
                 {
                     "message_id": msg.message_id,
@@ -688,6 +694,9 @@ class ReplyPipeline:
                 for msg in reply_messages
                 if msg.role == "message" and not msg.is_recalled
             ]
+        else:
+            tool_context.pop("delegation_providers", None)
+            tool_context.pop("delegation_inputs", None)
 
         # 4. 调用 LLM 进行回复
         if getattr(self.plugin, "passive_memory_enabled", False):

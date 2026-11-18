@@ -19,6 +19,9 @@ let currentEditingBotName = null;
 // Tag Select Components Instances
 let adaptersTagSelect = null;
 let subagentToolSelect = null;
+let subagentProvidersSelect = null;
+let callOnlyToolSelect = null;
+let callOnlyTools = [];
 let decProvidersTagSelect = null;
 let replyProvidersTagSelect = null;
 let invalidReplyFallbackTagSelect = null;
@@ -217,17 +220,38 @@ function openBotEditModal(botName = null) {
     document.getElementById('bot-form-nickname').value = bot.nickname || '';
     renderPersonaSelectOptions(bot.llm_reply_conf?.persona_id || 'default');
     const personaField = document.getElementById('bot-form-reply-persona');
-    const renderSubagentTools = (selection, keepSaved = false) => {
+    const personaToolNames = () => {
         const persona = stateBotMetadata.personas?.find(p => p.name === personaField.value);
-        const names = (stateBotMetadata.function_tools || []).filter(name =>
+        return (stateBotMetadata.function_tools || []).filter(name =>
             persona && (persona.tools == null || persona.tools.includes(name)));
+    };
+    callOnlyTools = bot.llm_reply_conf?.call_only_tools || [];
+    const renderCallOnlyTools = () => {
+        const delegated = new Set(subagentToolSelect.getValues());
+        const names = new Set(personaToolNames().filter(name => !delegated.has(name)));
+        callOnlyToolSelect?.destroy();
+        callOnlyToolSelect = new TagSelectComponent('bot-form-call-only-tools', {
+            placeholder: names.size ? '选择只记录调用的工具…' : '当前主 Agent 没有可用工具',
+            availableOptions: Array.from(names, id => ({id, name: id})),
+            selectedValues: callOnlyTools.filter(name => names.has(name)),
+            allowCustom: false,
+            onChange: selection => {
+                // Preserve the policy for tools temporarily outside the main tool set.
+                callOnlyTools = [...callOnlyTools.filter(name => !names.has(name)), ...selection];
+            }
+        });
+    };
+    const renderSubagentTools = (selection, keepSaved = false) => {
+        const names = personaToolNames();
         subagentToolSelect?.destroy();
         subagentToolSelect = new TagSelectComponent('bot-form-subagent-tools', {
             placeholder: names.length ? '选择要委派的工具…' : '当前人格没有可分配的工具',
             availableOptions: names.map(id => ({id, name: id})),
             selectedValues: keepSaved ? selection : selection.filter(name => names.includes(name)),
-            allowCustom: false
+            allowCustom: false,
+            onChange: renderCallOnlyTools
         });
+        renderCallOnlyTools();
     };
     renderSubagentTools(bot.llm_reply_conf?.subagent_tools || [], true);
     personaField.onchange = () => renderSubagentTools(subagentToolSelect.getValues());
@@ -237,6 +261,7 @@ function openBotEditModal(botName = null) {
     if (decProvidersTagSelect && typeof decProvidersTagSelect.destroy === 'function') decProvidersTagSelect.destroy();
     if (replyProvidersTagSelect && typeof replyProvidersTagSelect.destroy === 'function') replyProvidersTagSelect.destroy();
     if (invalidReplyFallbackTagSelect && typeof invalidReplyFallbackTagSelect.destroy === 'function') invalidReplyFallbackTagSelect.destroy();
+    subagentProvidersSelect?.destroy();
 
     // Initialize Tag Select for Adapter IDs
     adaptersTagSelect = new TagSelectComponent('bot-form-adapters', {
@@ -277,6 +302,10 @@ function openBotEditModal(botName = null) {
     replyProvidersTagSelect = new PrioritySelectComponent('bot-form-reply-providers', {
         availableOptions: stateBotMetadata.llm_providers || [],
         selectedValues: bot.llm_reply_conf?.provider_ids || []
+    });
+    subagentProvidersSelect = new PrioritySelectComponent('bot-form-subagent-providers', {
+        availableOptions: stateBotMetadata.llm_providers || [],
+        selectedValues: bot.llm_reply_conf?.subagent_provider_ids || []
     });
     invalidReplyFallbackTagSelect = new PrioritySelectComponent('bot-form-invalid-reply-fallback-providers', {
         availableOptions: stateBotMetadata.llm_providers || [],
@@ -786,7 +815,9 @@ async function saveBotFromModal() {
             invalid_reply_fallback_provider_ids: invalidReplyFallbackProviders,
             provider_selection_mode: document.getElementById('bot-form-reply-mode').value,
             persona_id: document.getElementById('bot-form-reply-persona')?.value || 'default',
+            subagent_provider_ids: subagentProvidersSelect.getValues(),
             subagent_tools: subagentToolSelect.getValues(),
+            call_only_tools: callOnlyTools,
             review_provider_id: document.getElementById('bot-form-review-provider').value,
         },
         tts_config: {

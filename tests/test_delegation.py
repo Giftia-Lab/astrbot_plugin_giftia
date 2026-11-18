@@ -36,6 +36,7 @@ from astrbot.core.utils.session_lock import session_lock_manager
 
 LONG_RESULT = "private raw tool output " * 400
 IMAGE_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWV8AAAAASUVORK5CYII="
+TOOL_ERROR = "private lookup error"
 
 
 class Lookup(FunctionTool):
@@ -50,6 +51,8 @@ class Lookup(FunctionTool):
             ]
         )
         yield "evidence-42"
+        if kwargs.get("fail"):
+            raise RuntimeError(TOOL_ERROR)
 
 
 def source(mid, content):
@@ -146,11 +149,17 @@ async def rt(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("force_xml", [False, True])
+@pytest.mark.parametrize("dedicated_providers", [False, True])
 async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
-    rt, force_xml
+    rt, force_xml, dedicated_providers
 ):
     p, event = rt.p, rt.e
     p.tools_config["force_xml_tools"] = force_xml
+    if dedicated_providers:
+        p.bot_map["bot"]["llm_reply_conf"].update(
+            subagent_provider_ids=["worker-first", "worker-second"],
+            provider_selection_mode="random",
+        )
     original = MessageData(
         message_id="a",
         user_id="alice",
@@ -168,7 +177,7 @@ async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
         ),
         LLMResponse("assistant", "<message>支持版本 4，依据是 evidence-42。</message>"),
     ]
-    p.context.llm_generate.side_effect = [
+    worker_call = (
         LLMResponse("assistant", '<root><tool_call name="lookup">{}</tool_call></root>')
         if force_xml
         else LLMResponse(
@@ -176,9 +185,19 @@ async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
             tools_call_name=["lookup"],
             tools_call_args=[None],
             tools_call_ids=["1"],
-        ),
-        LLMResponse("assistant", "支持版本 4，evidence-42"),
-    ]
+        )
+    )
+    worker_report = LLMResponse("assistant", "支持版本 4，evidence-42")
+    p.context.llm_generate.side_effect = (
+        [
+            RuntimeError("provider request failed"),
+            worker_call,
+            LLMResponse("assistant"),
+            worker_report,
+        ]
+        if dedicated_providers
+        else [worker_call, worker_report]
+    )
     p.aiocqhttp.send_message.side_effect = [(True, "ack"), (True, "final")]
     async with session_lock_manager.acquire_lock(event.unified_msg_origin):
         assert await p.chat_manager._reply_batch(
@@ -194,12 +213,21 @@ async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
     assert p.aiocqhttp.send_message.await_count == 2
     event.send.assert_not_called()
     parent, wake = (c.kwargs for c in p.context.tool_loop_agent.await_args_list)
+    assert parent["chat_provider_id"] == wake["chat_provider_id"] == "model"
+    expected_order = (
+        ["worker-first", "worker-second"] * 2 if dedicated_providers else ["model"] * 2
+    )
+    assert [
+        call.kwargs["chat_provider_id"]
+        for call in p.context.llm_generate.await_args_list
+    ] == expected_order
     if force_xml:
         assert '<tool_call name="direct"' in parent["system_prompt"]
         assert '<tool_call name="lookup"' not in parent["system_prompt"]
     else:
         assert [t.name for t in parent["tools"].tools] == ["direct"]
     assert "delegate_task" in parent["system_prompt"] and "查版本" in wake["prompt"]
+    assert "delegate_task" not in wake["system_prompt"]
     assert "evidence-42" in wake["prompt"] and LONG_RESULT not in wake["prompt"]
     worker_input = p.context.llm_generate.await_args.kwargs
     assert (
@@ -221,6 +249,78 @@ async def test_real_reply_dispatches_ack_and_isolates_worker_until_wakeup(
         "SELECT processing_status FROM chat_history WHERE message_id='a'"
     ) as cur:
         assert (await cur.fetchone())[0] == "handled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force_xml", [False, True])
+async def test_provider_configuration_without_tools_omits_delegation_prompt(
+    rt, force_xml
+):
+    p, event = rt.p, rt.e
+    p.bot_map["bot"]["llm_reply_conf"].update(
+        subagent_tools=[], subagent_provider_ids=["configured-model"]
+    )
+    p.tools_config["force_xml_tools"] = force_xml
+    p.context.tool_loop_agent.return_value = LLMResponse(
+        "assistant", "<message>收到。</message>"
+    )
+    rt.d.active = MagicMock(return_value=True)
+    rt.d.context = AsyncMock(return_value="<subagent_tasks>old task</subagent_tasks>")
+    message = MessageData(message_id="a", user_id="alice", content="你好")
+    state = SessionState(current=[QueuedMessage(event, message, True, 0, 3)])
+    async with session_lock_manager.acquire_lock(event.unified_msg_origin):
+        assert await p.chat_manager._reply_batch(
+            event, "bot", "7", state, [message], None, [], None
+        )
+    request = p.context.tool_loop_agent.await_args.kwargs
+    assert "delegate_task" not in request["system_prompt"]
+    assert "后台委派" not in request["system_prompt"]
+    assert "subagent_tasks" not in request["prompt"]
+    if force_xml:
+        assert '<tool_call name="lookup"' in request["system_prompt"]
+    else:
+        assert request["tools"].names() == ["lookup", "direct"]
+    rt.d.context.assert_not_awaited()
+    p.context.llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_xml_call_only_keeps_same_turn_results_and_logs_every_call(rt, fail):
+    p, event = rt.p, rt.e
+    p.tools_config["force_xml_tools"] = True
+    p.bot_map["bot"]["llm_reply_conf"]["call_only_tools"] = ["direct"]
+    message = MessageData(message_id="a", user_id="alice", content="查资料")
+    state = SessionState(current=[QueuedMessage(event, message, True, 0, 3)])
+    # Distinct calls to one tool produce identical history entries in this mode.
+    tool_calls = "".join(
+        f'<tool_call name="alias:direct">{json.dumps({"query": query, "fail": fail})}</tool_call>'
+        for query in ("private query 1", "private query 2")
+    )
+    p.context.tool_loop_agent.side_effect = [
+        LLMResponse("assistant", tool_calls),
+        LLMResponse("assistant", "<message>查到了。</message>"),
+    ]
+    async with session_lock_manager.acquire_lock(event.unified_msg_origin):
+        assert await p.chat_manager._reply_batch(
+            event, "bot", "7", state, [message], None, [], None
+        )
+    same_turn = p.context.tool_loop_agent.await_args.kwargs["prompt"]
+    assert LONG_RESULT in same_turn and "evidence-42" in same_turn
+    assert (TOOL_ERROR in same_turn) is fail
+    async with rt.db.query(
+        "SELECT content,created_at FROM chat_history WHERE role='operation_log' ORDER BY id"
+    ) as cur:
+        rows = await cur.fetchall()
+    assert len(rows) == 2
+    for content, created_at in rows:
+        entry = fromstring(content)
+        assert entry.attrib == {
+            "name": "direct",
+            "status": "failed" if fail else "finished",
+        }
+        assert entry.text is None
+        assert created_at
 
 
 @pytest.mark.asyncio
@@ -370,7 +470,10 @@ async def test_scoped_tools_budget_and_private_transcript(rt):
 
 
 @pytest.mark.asyncio
-async def test_native_history_preserves_all_yields_and_error(rt):
+@pytest.mark.parametrize("call_only", [False, True])
+async def test_native_history_preserves_all_yields_and_error(rt, call_only):
+    if call_only:
+        rt.p.bot_map["bot"]["llm_reply_conf"]["call_only_tools"] = ["lookup"]
     hooks = ReplyToolHistory(rt.p, rt.e, "bot", "7")
     tool = hooks.observe(ToolSet(tools=[rt.lookup])).tools[0]
     run = AgentContextWrapper(
@@ -380,6 +483,7 @@ async def test_native_history_preserves_all_yields_and_error(rt):
     parts = [
         part async for part in FunctionToolExecutor.execute(tool, run, query="<abc>")
     ]
+    assert parts[0].content[0].text == LONG_RESULT
     await hooks.on_tool_end(run, tool, {"query": "<abc>"}, parts[-1])
     await hooks.on_tool_start(run, tool, {"query": "second"})
     await hooks.finish(RuntimeError("failed after start"))
@@ -391,10 +495,14 @@ async def test_native_history_preserves_all_yields_and_error(rt):
         "started",
         "failed",
     ]
-    assert entries[0].get("id") == entries[1].get("id") != entries[2].get("id")
-    assert json.loads(entries[0].text)["arguments"] == {"query": "<abc>"}
-    assert LONG_RESULT in entries[1].text and "evidence-42" in entries[1].text
-    assert "failed after start" in entries[-1].text
+    if call_only:
+        assert all(e.get("name") == "lookup" and e.text is None for e in entries)
+        assert all(set(e.attrib) == {"name", "status"} for e in entries)
+    else:
+        assert entries[0].get("id") == entries[1].get("id") != entries[2].get("id")
+        assert json.loads(entries[0].text)["arguments"] == {"query": "<abc>"}
+        assert LONG_RESULT in entries[1].text and "evidence-42" in entries[1].text
+        assert "failed after start" in entries[-1].text
 
 
 @pytest.mark.asyncio

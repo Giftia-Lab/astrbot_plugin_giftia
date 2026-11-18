@@ -1619,6 +1619,7 @@
                     <button type="button" class="card-tab-btn" data-subtab="subtab-trigger" onclick="switchBotModalSubTab('subtab-trigger')">触发与接话策略</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-decision" onclick="switchBotModalSubTab('subtab-decision')">前置决策</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-reply" onclick="switchBotModalSubTab('subtab-reply')">正式回复</button>
+                    <button type="button" class="card-tab-btn" data-subtab="subtab-subagent" onclick="switchBotModalSubTab('subtab-subagent')">子 Agent</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-tts" onclick="switchBotModalSubTab('subtab-tts')">TTS</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-interactive" onclick="switchBotModalSubTab('subtab-interactive')">内置交互功能</button>
                 </div>
@@ -1642,9 +1643,9 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label for="bot-form-subagent-tools-input">子 Agent 可用工具</label>
-                        <div id="bot-form-subagent-tools" class="tag-select-container"></div>
-                        <small>选中的工具由子 Agent 调用。主人格可以委派任务并接收结果。</small>
+                        <label for="bot-form-call-only-tools-input">主 Agent · 仅记录调用的工具</label>
+                        <div id="bot-form-call-only-tools" class="tag-select-container"></div>
+                        <small>工具结果供当轮回复使用。历史只保留工具名、时间和执行状态。</small>
                     </div>
                     <div class="form-group">
                         <label>绑定的适配器 ID 列表 <span class="info-tooltip" data-tooltip="选择该机器人绑定的消息平台适配器账号"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
@@ -1771,7 +1772,20 @@
                     </div>
                 </div>
 
-                <!-- Sub-tab 4: TTS XML Conf -->
+                <div id="subtab-subagent" class="bot-subtab-content" style="display: none;">
+                    <div class="form-group">
+                        <label for="bot-form-subagent-providers-input">子 Agent 模型供应商</label>
+                        <div id="bot-form-subagent-providers" class="tag-select-container"></div>
+                        <small>按列表顺序尝试。留空时继承正式回复的模型配置。</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="bot-form-subagent-tools-input">子 Agent 可用工具</label>
+                        <div id="bot-form-subagent-tools" class="tag-select-container"></div>
+                        <small>所选工具由子 Agent 独占。工具留空时关闭委派。</small>
+                    </div>
+                </div>
+
+                <!-- TTS XML Conf -->
                 <div id="subtab-tts" class="bot-subtab-content" style="display: none;">
                     <div class="form-row form-row-switch" style="margin-bottom: 12px;">
                         <div style="flex: 1;">

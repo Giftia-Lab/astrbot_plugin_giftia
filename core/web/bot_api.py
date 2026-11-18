@@ -476,18 +476,17 @@ class BotApi:
                         "decision_conf", {}
                     ).get("session_completion_provider_id", "")
                 reply_conf = body["llm_reply_conf"] = body.get("llm_reply_conf") or {}
-                reply_conf.setdefault(
+                previous_reply = previous.get("llm_reply_conf", {})
+                for key in (
+                    "subagent_provider_ids",
                     "subagent_tools",
-                    previous.get("llm_reply_conf", {}).get("subagent_tools", []),
+                    "call_only_tools",
+                    "invalid_reply_fallback_provider_ids",
+                ):
+                    reply_conf.setdefault(key, previous_reply.get(key, []))
+                reply_conf.setdefault(
+                    "review_provider_id", previous_reply.get("review_provider_id", "")
                 )
-                if "review_provider_id" not in reply_conf:
-                    reply_conf["review_provider_id"] = previous.get(
-                        "llm_reply_conf", {}
-                    ).get("review_provider_id", "")
-                if "invalid_reply_fallback_provider_ids" not in reply_conf:
-                    reply_conf["invalid_reply_fallback_provider_ids"] = previous.get(
-                        "llm_reply_conf", {}
-                    ).get("invalid_reply_fallback_provider_ids", [])
 
             normalized_bot = manager.normalize_bot_config(body)
 

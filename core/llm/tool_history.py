@@ -29,9 +29,11 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
 
     def __init__(self, plugin, event, bot_name, session):
         self.cache = getattr(plugin, "data_cache", None)
-        self.nickname = (getattr(plugin, "bot_map", {}) or {}).get(bot_name, {}).get(
-            "nickname"
-        ) or bot_name
+        bot = (getattr(plugin, "bot_map", {}) or {}).get(bot_name, {})
+        self.nickname = bot.get("nickname") or bot_name
+        self.call_only_tools = frozenset(
+            bot.get("llm_reply_conf", {}).get("call_only_tools", [])
+        )
         self.event, self.bot_name, self.session = event, bot_name, session
         self.called_tools = []
         self.pending = None
@@ -40,7 +42,14 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
         if self.cache is None or not self.bot_name:
             return
         call_id, name = self.pending["id"], self.pending["name"]
-        content = escape(json.dumps(body, ensure_ascii=False, default=str))
+        attributes = f"name={quoteattr(name)} status={quoteattr(status)}"
+        if self.pending["include_details"]:
+            payload = escape(json.dumps(body, ensure_ascii=False, default=str))
+            content = (
+                f"<tool_call id={quoteattr(call_id)} {attributes}>{payload}</tool_call>"
+            )
+        else:
+            content = f"<tool_call {attributes}/>"
         await self.cache.add_message(
             self.bot_name,
             self.session,
@@ -51,7 +60,7 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
                 time=datetime.now().isoformat(),
                 message_id=f"tool_{call_id}_{status}",
                 role="operation_log",
-                content=f"<tool_call id={quoteattr(call_id)} name={quoteattr(name)} status={quoteattr(status)}>{content}</tool_call>",
+                content=content,
             ),
         )
 
@@ -61,6 +70,7 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
         self.pending = {
             "id": uuid.uuid4().hex,
             "name": tool.name,
+            "include_details": tool.name not in self.call_only_tools,
             "outputs": [],
             "error": "",
         }
@@ -70,7 +80,7 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
         if self.pending is None:
             return
         outputs = self.pending["outputs"]
-        if not outputs:
+        if self.pending["include_details"] and not outputs:
             outputs.append(tool_value(tool_result))
         failure = self.pending["error"] or (
             "工具返回执行错误" if getattr(tool_result, "isError", False) else ""
@@ -138,7 +148,8 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
                         async with aclosing(outcome):
                             async for part in outcome:
                                 if call is not None:
-                                    call["outputs"].append(tool_value(part))
+                                    if call["include_details"]:
+                                        call["outputs"].append(tool_value(part))
                                     if getattr(part, "isError", False):
                                         call["error"] = "工具返回执行错误"
                                 yield part
@@ -153,7 +164,11 @@ class ReplyToolHistory(BaseAgentRunHooks[AstrAgentContext]):
                 async def result():
                     try:
                         value = await outcome
-                        if call is not None and hasattr(value, "chain"):
+                        if (
+                            call is not None
+                            and call["include_details"]
+                            and hasattr(value, "chain")
+                        ):
                             call["outputs"].append(tool_value(value))
                         return value
                     except (Exception, asyncio.CancelledError) as exc:
