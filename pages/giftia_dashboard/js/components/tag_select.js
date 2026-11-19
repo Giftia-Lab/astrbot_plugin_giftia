@@ -9,6 +9,7 @@ class TagSelectComponent {
         this.availableOptions = options.availableOptions || []; // [{id, name, ...}, ...]
         this.selectedValues = options.selectedValues ? [...options.selectedValues] : []; // ['id1', 'id2', ...]
         this.onChange = options.onChange || null;
+        this.allowCustom = options.allowCustom !== false;
 
         this.searchTerm = '';
         this.isOpen = false;
@@ -40,7 +41,7 @@ class TagSelectComponent {
                                 </span>
                             `;
                         }).join('')}
-                        <input type="text" class="tag-select-input" value="${escapeHtml(this.searchTerm)}" placeholder="${this.selectedValues.length === 0 ? escapeHtml(this.placeholder) : '检索或追加...'}">
+                        <input type="text" id="${escapeHtml(this.containerId)}-input" class="tag-select-input" value="${escapeHtml(this.searchTerm)}" placeholder="${this.selectedValues.length === 0 ? escapeHtml(this.placeholder) : '检索或追加...'}">
                     </div>
                 </div>
 
@@ -62,7 +63,7 @@ class TagSelectComponent {
         });
 
         if (filtered.length === 0) {
-            if (this.searchTerm) {
+            if (this.searchTerm && this.allowCustom) {
                 return `
                     <div class="tag-select-option custom-add-option">
                         <span>按回车添加自定义标签: "<strong>${escapeHtml(this.searchTerm)}</strong>"</span>
@@ -208,6 +209,7 @@ class TagSelectComponent {
     }
 
     addValue(val) {
+        if (!this.allowCustom && !this.availableOptions.some(option => option.id === val)) return;
         if (!this.selectedValues.includes(val)) {
             this.selectedValues.push(val);
             if (this.onChange) this.onChange(this.selectedValues);

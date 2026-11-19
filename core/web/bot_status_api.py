@@ -25,7 +25,10 @@ class BotStatusApi:
 
             for r in rows:
                 memos = {"enabled": False, "limit": 0, "items": []}
-                if hasattr(self.giftia, "memos"):
+                if (
+                    hasattr(self.giftia, "memos")
+                    and r["bot_name"] in self.giftia.bot_map
+                ):
                     memos = await self.giftia.memos.dashboard(
                         r["bot_name"], r["group_or_user_id"]
                     )
@@ -127,3 +130,35 @@ class BotStatusApi:
         except Exception as e:
             logger.error(f"[Giftia API] update_bot_status error: {e}")
             return error_response(f"更新 Bot 状态失败: {str(e)}")
+
+    async def delete_bot_status(self):
+        """Delete the requested conversation status, including historical cards.
+
+        Returns:
+            A JSON response reporting whether the deletion completed.
+        """
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return error_response("会话状态标识无效")
+
+            status_id = body.get("status_id")
+            bot_name = body.get("bot_name")
+            group_or_user_id = body.get("group_or_user_id")
+            if (
+                type(status_id) is not int
+                or not 0 < status_id < 2**63
+                or not isinstance(bot_name, str)
+                or not bot_name.strip()
+                or not isinstance(group_or_user_id, str)
+                or not group_or_user_id.strip()
+            ):
+                return error_response("会话状态标识无效")
+
+            await self.giftia.data_cache.delete_bot_status(
+                bot_name, group_or_user_id, status_id
+            )
+            return json_response({"status": "success", "message": "会话状态已删除"})
+        except Exception:
+            logger.exception("[Giftia API] Failed to delete conversation status")
+            return error_response("删除会话状态失败，请重试")

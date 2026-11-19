@@ -222,6 +222,7 @@ function renderChartAndProgressBars() {
                 const typeNameMap = {
                     'reply': '正式回复',
                     'reply_review': '回复复审',
+                    'subagent': '子 Agent',
                     'decision': '前置决策',
                     'session_completion': '会话防抖判断',
                     'image_caption': '图片转述',
@@ -291,6 +292,7 @@ function renderChartAndProgressBars() {
                                     const typeNameMap = {
                                         'reply': '正式回复',
                                         'reply_review': '回复复审',
+                                        'subagent': '子 Agent',
                                         'decision': '前置决策',
                                         'session_completion': '会话防抖判断',
                                         'image_caption': '图片转述',
@@ -421,6 +423,7 @@ function renderChartAndProgressBars() {
         const categories = [
             { key: 'reply_tokens', name: '正式回复', class: 'reply' },
             { key: 'reply_review_tokens', name: '回复复审', class: 'reply_review' },
+            { key: 'subagent_tokens', name: '子 Agent', class: 'subagent' },
             { key: 'decision_tokens', name: '前置决策', class: 'decision' },
             { key: 'session_completion_tokens', name: '会话防抖判断', class: 'session_completion' },
             { key: 'image_caption_tokens', name: '图片转述', class: 'image_caption' },

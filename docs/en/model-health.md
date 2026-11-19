@@ -8,7 +8,7 @@ Each provider/model has one displayed name. Usage stays on one line until **å±•å
 
 ![Mobile model status with expanded usage](../images/model-health-mobile.png)
 
-Decisions, session completion checks, formal replies, invalid-output fallback, reply review, image/audio/video captions, sticker analysis, media inspection, memory and affinity summaries, and forwarded-message summaries share one in-memory health tracker keyed by AstrBot `provider_id`. Different configurations with the same model name have independent health. Provider configuration and ordering are preserved. Embeddings, reranking and TTS are outside this conversation-model view.
+Decisions, session completion checks, formal replies, invalid-output fallback, reply review, subagents, image/audio/video captions, sticker analysis, media inspection, memory and affinity summaries, and forwarded-message summaries share one in-memory health tracker keyed by AstrBot `provider_id`. Different configurations with the same model name have independent health. Provider configuration and ordering are preserved. Embeddings, reranking and TTS are outside this conversation-model view.
 
 ## Management switch and manual disabling
 

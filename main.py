@@ -19,6 +19,7 @@ except ImportError:
 
 from .core.bot.bot_config_manager import BotConfigManager
 from .core.conversation.chat_manager import ChatManager
+from .core.conversation.delegation import DelegationManager
 from .core.database.data_cache import DataCache
 from .core.database.database import Database
 from .core.handlers.commands import CommandHandler
@@ -40,6 +41,7 @@ from .core.llm.native_tools import (
 )
 from .core.llm.provider_health import get_provider_health
 from .core.llm.xml_parse import XmlParse
+from .core.memory.lancedb_versions import LanceDBVersions
 from .core.memory.memory import LTM
 from .core.memory.passive_memory import PassiveMemoryManager
 from .core.reports.service import ReportService
@@ -199,6 +201,8 @@ class Giftia(Star):
         """插件初始化方法"""
         # 实例化底座服务
         self.db = await Database.connect()
+        self.lancedb_versions = LanceDBVersions(self.db, self.http_manager.session)
+        await self.lancedb_versions.apply_pending()
         self.ltm = LTM(
             self.context, self.embedding_conf, self.rerank_conf, self.db.log_token_usage
         )
@@ -264,6 +268,7 @@ class Giftia(Star):
         )
         self.cmd_handler = CommandHandler(self)
         self.chat_manager = ChatManager(self)
+        self.delegations = DelegationManager(self)
 
         # 注册定时任务提醒函数
         self.task_manager.register_func("remind", self.remind_task)
@@ -875,6 +880,8 @@ class Giftia(Star):
     async def terminate(self):
         """销毁方法"""
         self._terminated = True
+        if hasattr(self, "delegations"):
+            await self.delegations.close()
         if hasattr(self, "provider_health"):
             await self.provider_health.close()
         if hasattr(self, "_original_send_message"):

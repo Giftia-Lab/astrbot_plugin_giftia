@@ -80,6 +80,8 @@ DEFAULT_BOT_CONFIG = {
         "invalid_reply_fallback_provider_ids": [],
         "provider_selection_mode": "fallback",
         "persona_id": "default",
+        "subagent_provider_ids": [],
+        "subagent_tools": [],
         "review_provider_id": "",
     },
     "tts_config": {
@@ -374,6 +376,16 @@ class BotConfigManager:
                 raw_reply.get("review_provider_id") or ""
             ).strip(),
         }
+        for key in ("subagent_provider_ids", "subagent_tools"):
+            raw_ids = raw_reply.get(key)
+            ids = dict.fromkeys(
+                value.strip()
+                for value in (raw_ids if isinstance(raw_ids, list) else ())
+                if isinstance(value, str) and value.strip()
+            )
+            if key == "subagent_tools":
+                ids.pop("delegate_task", None)
+            bot["llm_reply_conf"][key] = list(ids)
 
         # tts_config
         raw_tts = bot.get("tts_config") or {}

@@ -22,6 +22,19 @@ class ModelHealthApi:
             Deduplicated provider descriptions with shared runtime health.
         """
         uses: dict[str, list[str]] = {}
+
+        def add_uses(provider_ids, label: str):
+            for provider_id in provider_ids or ():
+                if provider_id:
+                    uses.setdefault(provider_id, []).append(label)
+
+        def configured_providers(configuration: dict) -> list[str]:
+            provider_ids = configuration.get("provider_ids") or [
+                configuration.get("provider_id"),
+                *(configuration.get("fallback_provider_ids") or []),
+            ]
+            return [provider_id for provider_id in provider_ids if provider_id]
+
         bots = self.giftia.bot_map
         configured_bots = getattr(
             getattr(self.giftia, "bot_config_manager", None), "bots", None
@@ -35,28 +48,32 @@ class ModelHealthApi:
         for bot_name, bot in bots.items():
             if not bot.get("enabled", True):
                 bot_name = f"{bot_name}（已停用）"
-            decision = bot.get("decision_conf", {})
-            reply = bot.get("llm_reply_conf", {})
-            for configuration, label in (
-                (decision, "前置决策"),
-                (reply, "正式回复/转发转述"),
+            decision = bot.get("decision_conf") or {}
+            reply = bot.get("llm_reply_conf") or {}
+            decision_providers = configured_providers(decision)
+            reply_providers = configured_providers(reply)
+            add_uses(decision_providers, f"{bot_name} · 前置决策")
+            add_uses(reply_providers, f"{bot_name} · 正式回复/转发转述")
+            add_uses(
+                reply.get("invalid_reply_fallback_provider_ids"),
+                f"{bot_name} · 无效回复回退",
+            )
+            add_uses([reply.get("review_provider_id")], f"{bot_name} · 回复复审")
+            add_uses(
+                [decision.get("session_completion_provider_id")],
+                f"{bot_name} · 会话防抖判断",
+            )
+            subagent_providers = [
+                provider_id
+                for provider_id in (reply.get("subagent_provider_ids") or [])
+                if isinstance(provider_id, str) and provider_id.strip()
+            ]
+            if not subagent_providers and any(
+                isinstance(tool, str) and tool.strip()
+                for tool in (reply.get("subagent_tools") or [])
             ):
-                provider_ids = configuration.get("provider_ids") or [
-                    configuration.get("provider_id"),
-                    *(configuration.get("fallback_provider_ids") or []),
-                ]
-                for provider_id in provider_ids:
-                    if provider_id:
-                        uses.setdefault(provider_id, []).append(f"{bot_name} · {label}")
-            for provider_id in reply.get("invalid_reply_fallback_provider_ids") or []:
-                if provider_id:
-                    uses.setdefault(provider_id, []).append(
-                        f"{bot_name} · 无效回复回退"
-                    )
-            if provider_id := reply.get("review_provider_id"):
-                uses.setdefault(provider_id, []).append(f"{bot_name} · 回复复审")
-            if provider_id := decision.get("session_completion_provider_id"):
-                uses.setdefault(provider_id, []).append(f"{bot_name} · 会话防抖判断")
+                subagent_providers = reply_providers
+            add_uses(subagent_providers, f"{bot_name} · 子 Agent")
 
         captions = self.giftia.caption_config
         for provider_ids, label in (
@@ -69,9 +86,7 @@ class ModelHealthApi:
             ),
             (self.giftia.passive_memory_provider_ids, "记忆/好感度归纳"),
         ):
-            for provider_id in provider_ids:
-                if provider_id:
-                    uses.setdefault(provider_id, []).append(label)
+            add_uses(provider_ids, label)
 
         instances = getattr(
             getattr(self.giftia.context, "provider_manager", None), "inst_map", {}

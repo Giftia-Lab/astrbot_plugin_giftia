@@ -4,6 +4,7 @@ import { state } from './modules/state.js';
 import * as filters from './modules/filters.js';
 import * as history from './modules/render/history.js';
 import * as memories from './modules/render/memories.js';
+import { loadLanceDBVersion } from './modules/lancedb_version.js';
 import * as status from './modules/render/status.js';
 import * as reports from './modules/render/reports.js';
 import * as media from './modules/render/media.js';
@@ -55,6 +56,7 @@ window.GiftiaApp = {
     get deleteChatMessage() { return window.deleteChatMessage; },
 
     // Memories
+    loadLanceDBVersion,
     loadMemories: memories.loadMemories,
     renderMemories: memories.renderMemories,
 

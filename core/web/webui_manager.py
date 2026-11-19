@@ -10,6 +10,22 @@ class WebUIManager:
         ctx = self.plugin.context
 
         for route, handler, method in (
+            ("/dependencies/lancedb", self.web_api.get_lancedb_status, "GET"),
+            (
+                "/dependencies/lancedb/versions",
+                self.web_api.get_lancedb_versions,
+                "GET",
+            ),
+            ("/dependencies/lancedb", self.web_api.set_lancedb_plan, "POST"),
+        ):
+            ctx.register_web_api(
+                route=f"/astrbot_plugin_giftia{route}",
+                view_handler=handler,
+                methods=[method],
+                desc="Inspect and schedule LanceDB version changes",
+            )
+
+        for route, handler, method in (
             ("/models/health", self.web_api.get_model_health, "GET"),
             ("/models/test", self.web_api.test_model_connection, "POST"),
             ("/models/settings", self.web_api.update_model_health_settings, "POST"),
@@ -202,6 +218,12 @@ class WebUIManager:
             desc="Update bot mood/state",
         )
         ctx.register_web_api(
+            route="/astrbot_plugin_giftia/status/delete",
+            view_handler=self.web_api.delete_bot_status,
+            methods=["POST"],
+            desc="Delete a conversation status record",
+        )
+        ctx.register_web_api(
             route="/astrbot_plugin_giftia/memos",
             view_handler=self.web_api.get_memos,
             methods=["GET"],
@@ -253,6 +275,12 @@ class WebUIManager:
             view_handler=self.web_api.get_chat_history,
             methods=["GET"],
             desc="Get chat history list",
+        )
+        ctx.register_web_api(
+            route="/astrbot_plugin_giftia/chat_history/delegation",
+            view_handler=self.web_api.get_delegated_task,
+            methods=["GET"],
+            desc="Read a delegated task transcript by chat history receipt",
         )
         ctx.register_web_api(
             route="/astrbot_plugin_giftia/chat_history/filter_options",

@@ -21,7 +21,7 @@ from .event_utils import resolve_bot_name
 from .http_manager import HttpManager
 from .message_parse_types import ChainParseResult
 from .path_security import get_safe_local_media_path
-from .schemas import MediaCaption
+from .schemas import IMAGE_METADATA_PATTERN, MediaCaption
 from .video_utils import format_duration, format_file_size, get_remote_video_info
 
 # 支持的图片文件格式
@@ -261,13 +261,21 @@ class MessageMediaFormatter:
                 group_or_user_id=group_or_user_id,
             )
         if hash_val and media_caption:
-            result.media_id_list.append(hash_val)
             await self.data_cache.set_caption(media_caption)
-            return f"[图片:{hash_val}]", result
-        if hash_val and legacy_caption:
-            result.media_id_list.append(hash_val)
-            return f"[图片:{hash_val}]", result
-        return "[图片]", result
+        media_caption = media_caption or legacy_caption
+        if not hash_val or not media_caption:
+            return "[图片]", result
+
+        result.media_id_list.append(hash_val)
+        tag = f"[图片:{hash_val}]"
+        details = []
+        if media_caption.width > 0 and media_caption.height > 0:
+            details.append(f"尺寸:{media_caption.width}×{media_caption.height}px")
+        if size := format_file_size(media_caption.file_size):
+            details.append(f"大小:{size}")
+        if details:
+            tag += "[" + ", ".join(details) + "]"
+        return tag, result
 
     async def format_audio_ref(
         self, url: str, file_name: str | None, defer_caption: bool, event=None
@@ -802,7 +810,7 @@ async def format_node_components(
 
     # 匹配所有媒体标签 [图片:xxx], [视频:xxx], [语音:xxx]
     media_tag_pattern = re.compile(r"(\[(?:图片|语音|视频):[^\]\s]+\])")
-    tokens = media_tag_pattern.split(content_str)
+    tokens = media_tag_pattern.split(IMAGE_METADATA_PATTERN.sub(r"\1", content_str))
     components: list[BaseMessageComponent] = []
 
     for token in tokens:

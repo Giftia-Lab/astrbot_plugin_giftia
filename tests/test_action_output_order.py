@@ -549,6 +549,7 @@ async def test_xml_tool_outputs_and_results_follow_order(
         call_llm_reply=AsyncMock(side_effect=[result, XmlLlmResult()])
     )
     plugin.data_cache.set_user_profile = AsyncMock()
+    plugin.data_cache.get_group_prompt_data = AsyncMock(return_value="")
     for name in (
         "get_recent_message",
         "get_bot_status",
@@ -564,7 +565,6 @@ async def test_xml_tool_outputs_and_results_follow_order(
     pipeline = ReplyPipeline(plugin)
     pipeline.media_captioner = SimpleNamespace(
         get_cached_media_captions=AsyncMock(return_value=[]),
-        get_image_metadata=AsyncMock(return_value={}),
     )
     pipeline.tool_executor = runtime.dispatcher.tool_executor
     async for chunk in pipeline.dispatch_llm_reply_loop(

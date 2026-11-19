@@ -352,8 +352,19 @@ class Database(ProfileStoreMixin):
             group_or_user_id, bot_name, status
         )
 
-    async def delete_bot_status(self, group_or_user_id: str, bot_name: str):
-        return await self.bot_status_repo.delete_bot_status(group_or_user_id, bot_name)
+    async def delete_bot_status(
+        self, group_or_user_id: str, bot_name: str, *, status_id: int | None = None
+    ) -> None:
+        """Delete persisted state for the requested bot and conversation.
+
+        Args:
+            group_or_user_id: Owning conversation ID.
+            bot_name: Owning bot name.
+            status_id: Expected row ID, if deleting a specific status record.
+        """
+        await self.bot_status_repo.delete_bot_status(
+            group_or_user_id, bot_name, status_id=status_id
+        )
 
     # =========================================================================
     # Memories Delegations

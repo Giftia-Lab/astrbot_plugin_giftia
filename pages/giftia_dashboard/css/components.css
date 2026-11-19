@@ -266,6 +266,15 @@ tr:hover td {
     width: 100%;
 }
 
+.delegated-trace summary { cursor: pointer; color: var(--primary); }
+.delegated-trace pre {
+    max-height: 24rem;
+    max-width: min(30rem, 75vw);
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 .tag-select-box {
     display: flex;
     flex-wrap: wrap;

@@ -9,6 +9,44 @@ from .web_helpers import attach_group_names
 class ChatHistoryApi:
     """Chat history APIs: query, filter options, delete, auto clean configs/triggers."""
 
+    async def get_delegated_task(self):
+        """Expand the private tool transcript linked to a stored delegation receipt."""
+        try:
+            receipt = int(request.query.get("receipt", ""))
+            if not 0 < receipt < 2**63:
+                raise ValueError
+        except (TypeError, ValueError):
+            return error_response("委派记录 ID 无效")
+        async with self.giftia.db.query(
+            """SELECT t.* FROM chat_history h JOIN delegated_tasks t
+               ON t.id=CAST(substr(h.message_id,10) AS INTEGER)
+               AND t.bot_name=h.bot_name AND t.session_id=h.group_or_user_id
+               AND substr(h.message_id,1,length('delegate_'||t.id||'_'))='delegate_'||t.id||'_'
+               WHERE h.id=? AND h.role='operation_log'""",
+            (receipt,),
+        ) as cur:
+            task = await cur.fetchone()
+        if task is None:
+            return error_response("没有找到对应的子任务")
+        async with self.giftia.db.query(
+            "SELECT revision,kind,payload FROM delegated_steps WHERE task_id=? ORDER BY id",
+            (task["id"],),
+        ) as cur:
+            steps = [
+                {"revision": rev, "kind": kind, "data": json.loads(payload)}
+                for rev, kind, payload in await cur.fetchall()
+            ]
+        return json_response(
+            {
+                "status": "success",
+                "data": {
+                    "task_id": task["id"],
+                    "status": task["status"],
+                    "steps": steps,
+                },
+            }
+        )
+
     async def get_chat_history(self):
         """Get chat logs with pagination and filters."""
         try:

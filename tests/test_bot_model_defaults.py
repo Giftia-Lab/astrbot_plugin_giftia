@@ -29,6 +29,57 @@ def test_optional_session_completion_provider_round_trip(tmp_path, value, expect
 
 
 @pytest.mark.asyncio
+async def test_bot_api_preserves_and_clears_subagent_settings_and_drops_call_only_tools(
+    tmp_path, monkeypatch
+):
+    manager = BotConfigManager.__new__(BotConfigManager)
+    manager.config_file = tmp_path / "bots_config.json"
+    # Simulate a legacy config with a retired call_only_tools list and no worker model override.
+    manager.config_file.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "bot",
+                    "llm_reply_conf": {
+                        "subagent_tools": ["lookup"],
+                        "call_only_tools": ["direct"],
+                    },
+                }
+            ]
+        )
+    )
+    assert "call_only_tools" not in DEFAULT_BOT_CONFIG["llm_reply_conf"]
+    saved = manager.load_bots()[0]["llm_reply_conf"]
+    assert saved["subagent_tools"] == ["lookup"]
+    assert saved["subagent_provider_ids"] == []
+    assert "call_only_tools" not in saved
+    api = BotApi(SimpleNamespace(bot_config_manager=manager, sync_bot_maps=Mock()))
+    for changes, expected_providers in (
+        (
+            {
+                "subagent_provider_ids": [" worker-b ", "worker-a", "worker-b", None],
+                "call_only_tools": ["direct"],
+            },
+            ["worker-b", "worker-a"],
+        ),
+        ({"provider_ids": ["main"]}, ["worker-b", "worker-a"]),
+        ({"subagent_provider_ids": []}, []),
+    ):
+        monkeypatch.setattr(
+            bot_api_module,
+            "request",
+            SimpleNamespace(
+                json=AsyncMock(return_value={"name": "bot", "llm_reply_conf": changes})
+            ),
+        )
+        assert (await api.save_bot()).status_code == 200
+        saved = manager.load_bots()[0]["llm_reply_conf"]
+        assert saved["subagent_provider_ids"] == expected_providers
+        assert saved["subagent_tools"] == ["lookup"]
+        assert "call_only_tools" not in saved
+
+
+@pytest.mark.asyncio
 async def test_bot_api_preserves_completion_for_old_clients_and_allows_disable(
     tmp_path, monkeypatch
 ):
@@ -104,6 +155,7 @@ def runtime():
             get_recent_message=AsyncMock(return_value=[]),
             get_bot_status=AsyncMock(return_value=Status()),
             get_group_profile=AsyncMock(return_value=""),
+            get_group_prompt_data=AsyncMock(return_value=""),
             get_user_profile_record=AsyncMock(return_value={}),
             get_user_relation=AsyncMock(return_value=None),
             build_active_user_briefs=AsyncMock(return_value=[]),

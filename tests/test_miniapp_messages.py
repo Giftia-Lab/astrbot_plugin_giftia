@@ -85,9 +85,10 @@ async def test_miniapp_persists_readable_content_and_image_hash(
         parser.data_cache.db = Database(conn)
         message, images, audio = await parser.parse_user_message(event, "bot")
 
+        image_ref = f"[图片:{IMAGE_ID}][尺寸:1×1px, 大小:{len(PNG_BYTES)}B]"
         assert message.content == (
             "前文 [小程序]\n示例小程序\n一篇图文分享\n第一段说明\n第二段说明 "
-            f"[图片:{IMAGE_ID}] \n链接: {LINK} 后文"
+            f"{image_ref} \n链接: {LINK} 后文"
         )
         assert message.media_id_list == [IMAGE_ID]
         assert message.forward_messages == []
@@ -102,7 +103,7 @@ async def test_miniapp_persists_readable_content_and_image_hash(
 
         # The same picture sent normally must resolve to the same cached ID.
         normal = await parser.chain_to_result([Image.fromURL(PREVIEW)])
-        assert normal.content == f"[图片:{IMAGE_ID}]"
+        assert normal.content == image_ref
         parser.http_manager.download_media.assert_awaited_with(PREVIEW)
         async with conn.execute("SELECT COUNT(*) FROM media_caption") as cursor:
             assert (await cursor.fetchone())[0] == 1

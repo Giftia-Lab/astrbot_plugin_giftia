@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from ..utils.schemas import ACCOUNT_TYPE_LABELS
@@ -31,7 +32,7 @@ PROFILE_NAMES_CTE = """
 class ProfileStoreMixin(RelationHistoryStoreMixin):
     @serialized_operation
     async def get_group_metadata(self, bot_name: str, group_id: str) -> dict:
-        """Read a group's last known platform name and successful refresh time.
+        """Read a group's name and any saved member summary.
 
         Args:
             bot_name: Owning bot configuration.
@@ -41,12 +42,21 @@ class ProfileStoreMixin(RelationHistoryStoreMixin):
             Stored metadata, or an empty dictionary for an unknown group.
         """
         async with self.conn.execute(
-            "SELECT group_name, refreshed_at FROM group_metadata "
+            "SELECT group_name, refreshed_at, onebot_snapshot FROM group_metadata "
             "WHERE bot_name=? AND group_id=?",
             (bot_name, group_id),
         ) as cursor:
             row = await cursor.fetchone()
-        return dict(row) if row else {}
+            if not row:
+                return {}
+        record = dict(row)
+        try:
+            snapshot = json.loads(record.pop("onebot_snapshot") or "null")
+        except (TypeError, ValueError):
+            snapshot = None
+        if isinstance(snapshot, dict) and snapshot:
+            record["onebot_snapshot"] = snapshot
+        return record
 
     @serialized_operation
     async def get_group_names(
@@ -76,7 +86,13 @@ class ProfileStoreMixin(RelationHistoryStoreMixin):
 
     @serialized_operation
     async def upsert_group_metadata(
-        self, bot_name: str, group_id: str, group_name: str, refreshed_at: float
+        self,
+        bot_name: str,
+        group_id: str,
+        group_name: str,
+        refreshed_at: float,
+        *,
+        onebot_snapshot: dict | None = None,
     ) -> None:
         """Persist a successful observation without clearing names on empty results.
 
@@ -85,14 +101,25 @@ class ProfileStoreMixin(RelationHistoryStoreMixin):
             group_id: Platform group identifier.
             group_name: Nonempty platform group name.
             refreshed_at: Unix timestamp of the successful observation.
+            onebot_snapshot: New member summary, or None to preserve the saved one.
         """
         if not bot_name or not group_id or not group_name.strip():
             return
         await self.conn.execute(
-            "INSERT INTO group_metadata (bot_name, group_id, group_name, refreshed_at) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT(bot_name, group_id) DO UPDATE SET "
-            "group_name=excluded.group_name, refreshed_at=excluded.refreshed_at",
-            (bot_name, group_id, group_name.strip(), refreshed_at),
+            "INSERT INTO group_metadata "
+            "(bot_name, group_id, group_name, refreshed_at, onebot_snapshot) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(bot_name, group_id) DO UPDATE SET "
+            "group_name=excluded.group_name, refreshed_at=excluded.refreshed_at, "
+            "onebot_snapshot=COALESCE(excluded.onebot_snapshot, group_metadata.onebot_snapshot)",
+            (
+                bot_name,
+                group_id,
+                group_name.strip(),
+                refreshed_at,
+                json.dumps(onebot_snapshot, ensure_ascii=False)
+                if onebot_snapshot
+                else None,
+            ),
         )
         await self.conn.commit()
 

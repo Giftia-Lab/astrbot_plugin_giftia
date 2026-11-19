@@ -9,7 +9,6 @@ from xxhash import xxh3_64_hexdigest
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
-from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.exceptions import EmptyModelOutputError
@@ -43,6 +42,7 @@ from .preset_prompts import (
     get_video_caption_prompt,
 )
 from .provider_health import ProviderUnavailableError, get_provider_health
+from .tool_history import ReplyToolHistory
 from .xml_parse import XmlParse
 
 _orig_detect_image_mime_type = media_utils.detect_image_mime_type
@@ -96,23 +96,6 @@ def _scoped_video_mime_detection():
         yield
     finally:
         media_utils.detect_image_mime_type = orig_fn
-
-
-class _ReplyToolHooks(BaseAgentRunHooks[AstrAgentContext]):
-    """Track tool execution across all steps of one reply attempt."""
-
-    def __init__(self):
-        self.called_tools: list[str] = []
-
-    async def on_tool_start(self, run_context, tool, tool_args) -> None:
-        """Record a tool before it can produce side effects.
-
-        Args:
-            run_context: Current agent context.
-            tool: Tool about to execute.
-            tool_args: Arguments supplied to the tool.
-        """
-        self.called_tools.append(tool.name)
 
 
 class CallLLM:
@@ -462,7 +445,26 @@ class CallLLM:
         native_tools = ToolSet()
         xml_tools = []
         if use_source_tools or force_xml_tools:
-            tools_set = self._get_reply_tools(persona_tools)
+            tools_set, delegated = self.split_reply_tools(
+                persona_tools,
+                bot_config.get("llm_reply_conf", {}).get("subagent_tools", []),
+            )
+            if delegated.tools and not (tool_context or {}).get("delegation_delivery"):
+                catalog = "\n".join(
+                    f"- {t.name}: {t.description}" for t in delegated.tools
+                )
+                actual_system_prompt += (
+                    "\n\n## 子 Agent 委派\n"
+                    "以下能力由后台子 Agent 独立执行，完成后系统会带着汇报唤醒你；"
+                    "用户仅问进度时可根据 `<subagent_tasks>` 中的状态回答。\n"
+                    "每个会话同时只受理一个任务。请把本轮的委派要求合并到一个标签中。"
+                    "已有活跃任务时，可以追加与该任务有关的要求。新任务需等当前任务投递结束。\n"
+                    "- **新建任务**：`<sub_agent>目标、必要背景和需要的依据</sub_agent>`（可与 `<message>` 并列输出进度提示）\n"
+                    '- **补充要求**：`<sub_agent task_id="任务ID">补充要求</sub_agent>`\n'
+                    "子 Agent 可用能力：\n" + catalog
+                )
+            if tool_context is not None:
+                tool_context["xml_tools"] = [t.name for t in tools_set.tools]
             if force_xml_tools:
                 xml_tools = tools_set.tools
             else:
@@ -477,10 +479,13 @@ class CallLLM:
                     '所有工具统一通过并列的 <tool_call name="工具名">参数JSON</tool_call> 标签调用，不使用原生 function calling。工具结果会在执行后提供，可据此继续调用或组织回复。若没有需要调用的工具，则不要输出 tool_call 标签。\n'
                     "注意：参数部分必须是正确的 JSON 格式对象，例如：\n"
                     "<status>...</status>\n"
-                    '<tool_call name="search_chat_history">{"keyword": "查询词"}</tool_call>\n\n'
+                    '<tool_call name="工具名">{"参数名": "值"}</tool_call>\n\n'
                     "当前可用的工具列表：\n"
                 ) + xml_tools_str
                 actual_system_prompt = actual_system_prompt + xml_tools_instruction
+
+        elif tool_context is not None:
+            tool_context["xml_tools"] = []
 
         agent_context = None
         if native_tools.tools:
@@ -526,7 +531,11 @@ class CallLLM:
                         logger.warning(
                             f"Retrying reply request {attempt}. provider_id: {provider_id}"
                         )
-                    reply_hooks = _ReplyToolHooks()
+                    reply_hooks = ReplyToolHistory(
+                        self.plugin, event, bot_name, group_or_user_id
+                    )
+                    if use_native_tools:
+                        request_kwargs["tools"] = reply_hooks.observe(native_tools)
                     llm_resp = None
                     error = None
                     try:
@@ -543,6 +552,15 @@ class CallLLM:
                         break
                     except Exception as exc:
                         error = exc
+                    finally:
+                        await reply_hooks.finish(
+                            error,
+                            tools_called=(
+                                getattr(llm_resp, "tools_call_name", None)
+                                if use_native_tools
+                                else None
+                            ),
+                        )
 
                     request_failed = error is not None and not isinstance(
                         error, EmptyModelOutputError
@@ -645,6 +663,25 @@ class CallLLM:
             if not invalid_output:
                 return None
         return None
+
+    def split_reply_tools(
+        self, persona_tools, delegated_names
+    ) -> tuple[ToolSet, ToolSet]:
+        """Partition the effective persona tools for one model request.
+
+        Args:
+            persona_tools: Current AstrBot persona allowlist.
+            delegated_names: Tool names assigned to the worker by this bot.
+
+        Returns:
+            Disjoint main and worker tool sets with the SDK permissions intact.
+        """
+        available = self._get_reply_tools(persona_tools)
+        main, worker = ToolSet(), ToolSet()
+        for tool in available.tools:
+            if tool.name != "delegate_task":
+                (worker if tool.name in delegated_names else main).add_tool(tool)
+        return main, worker
 
     def _get_reply_tools(self, persona_tools: list[str] | None) -> ToolSet:
         """Prepare the available tool set once for all reply attempts.

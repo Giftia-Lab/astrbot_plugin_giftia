@@ -19,7 +19,7 @@ from ..memory.recall_scope import (
     select_automatic_recall_memories,
 )
 from ..utils.anti_drool import filter_duplicate_replies
-from ..utils.schemas import MediaCaption, MessageData
+from ..utils.schemas import IMAGE_METADATA_PATTERN, MediaCaption, MessageData
 from .context_window import ContextWindows
 from .media_captioner import MediaCaptioner
 from .memory_recall import conf_float, conf_int, search_automatic_user_memories
@@ -52,6 +52,7 @@ class ReplyPipeline:
             "leave",
             "user_block_actions",
             "tools_to_call",
+            "sub_agent_tasks",
             "native_tools_called",
             "add_stickers",
             "send_stickers",
@@ -157,7 +158,7 @@ class ReplyPipeline:
                 lambda match: (
                     "\n" + captions[match[1]] + "\n" if match[1] in captions else ""
                 ),
-                message.content or "",
+                IMAGE_METADATA_PATTERN.sub(r"\1", message.content or ""),
             ).strip()
             if not content:
                 continue
@@ -226,6 +227,7 @@ class ReplyPipeline:
         review_after_id: int | None = None,
         cross_group_context: dict[str, list[MessageData]] | None = None,
         cross_group_names: dict[str, str] | None = None,
+        delegation_delivery: bool = False,
     ):
         """Generate frozen reply turns and review the first eligible unsent draft.
 
@@ -249,6 +251,7 @@ class ReplyPipeline:
             review_after_id: Input watermark; None disables review for this run.
             cross_group_context: Source-group windows frozen across tool turns.
             cross_group_names: Known names for the frozen source-group windows.
+            delegation_delivery: Resume a completed background task for its user.
 
         Yields:
             Parsed reply results ready for action dispatch.
@@ -341,7 +344,6 @@ class ReplyPipeline:
             bot_name=bot_name,
             recent_messages=context_messages,
         )
-        image_metadata = await self.media_captioner.get_image_metadata(context_messages)
 
         if relevant_memories is None:
             relevant_memories = []
@@ -456,33 +458,23 @@ class ReplyPipeline:
         )
         user_profiles = []
         for uid, user_nickname in reply_users.items():
-            (
-                user_profile,
-                user_relation,
-                relation_changes,
-                relation_score,
-            ) = await asyncio.gather(
-                self.plugin.data_cache.get_user_profile_record(
+            user_profile = await self.plugin.data_cache.get_user_profile_record(
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
+                user_id=uid,
+            )
+            relation_score = user_profile
+            if not relation_score or "total_count" not in relation_score:
+                relation_score = await self.plugin.db.get_relation_score(
                     bot_name=bot_name,
                     group_or_user_id=group_or_user_id,
                     user_id=uid,
-                ),
-                self.plugin.data_cache.get_user_relation(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                ),
-                self.plugin.db.get_relation_changes(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                    limit=3,
-                ),
-                self.plugin.db.get_relation_score(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                ),
+                )
+            relation_changes = await self.plugin.db.get_relation_changes(
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
+                user_id=uid,
+                limit=3,
             )
             user_profiles.append(
                 {
@@ -491,7 +483,7 @@ class ReplyPipeline:
                     or (event.get_sender_name() if uid == sender_id else "")
                     or "",
                     "user_profile": user_profile,
-                    "user_relation": user_relation,
+                    "user_relation": None,
                     "relation_changes": relation_changes,
                     "relation_score": relation_score,
                     "common_groups": common_groups.get(uid, []),
@@ -588,24 +580,24 @@ class ReplyPipeline:
             )
 
         # 3. 构造回复提示词 Prompt
-        group_data = (
-            await event.get_group(event.get_group_id()) if event.get_group_id() else ""
-        )
-        if isinstance(getattr(group_data, "group_name", None), str):
-            await self.plugin.data_cache.remember_group_name(
-                bot_name,
-                str(event.get_group_id()),
-                group_data.group_name,
-                refreshed=True,
-            )
+        group_data = await self.plugin.data_cache.get_group_prompt_data(bot_name, event)
+        prompt_extra = list(other_data or [])
+        delegations = getattr(self.plugin, "delegations", None)
+        if (
+            llm_reply_conf.get("subagent_tools")
+            and delegations
+            and delegations.active(bot_name, event.unified_msg_origin)
+        ):
+            active_tasks = await delegations.context(bot_name, event.unified_msg_origin)
+            if active_tasks:
+                prompt_extra.append(active_tasks)
         user_prompt = build_reply_prompt(
             current_session_id=group_or_user_id,
             recent_messages=prompt_recent_messages,
             media_captions=media_captions,
-            image_metadata=image_metadata,
             reply_messages=prompt_reply_messages,
             remind_message=remind_message,
-            group_data=str(group_data),
+            group_data=group_data,
             bot_status=bot_status,
             tool_results=tool_results,
             session_recalled_memories=session_recalled_memories,
@@ -617,7 +609,7 @@ class ReplyPipeline:
             active_user_briefs=active_user_briefs,
             memos=memos,
             memo_limit=memo_limit,
-            other_data=other_data,
+            other_data=prompt_extra,
             bot_sticker=bot_sticker_cache,
             message_truncate_limit=getattr(
                 self.plugin, "reply_message_truncate_limit", 1500
@@ -666,6 +658,25 @@ class ReplyPipeline:
         )
         if provider_selection_mode == "random":
             random.shuffle(provider_ids)
+        tool_context["delegation_delivery"] = delegation_delivery
+        if llm_reply_conf.get("subagent_tools") and not delegation_delivery:
+            tool_context["delegation_providers"] = (
+                llm_reply_conf.get("subagent_provider_ids") or provider_ids
+            )
+            tool_context["delegation_inputs"] = [
+                {
+                    "message_id": msg.message_id,
+                    "user_id": msg.user_id,
+                    "nickname": msg.nickname,
+                    "content": msg.content,
+                    "media_ids": msg.media_id_list,
+                }
+                for msg in reply_messages
+                if msg.role == "message" and not msg.is_recalled
+            ]
+        else:
+            tool_context.pop("delegation_providers", None)
+            tool_context.pop("delegation_inputs", None)
 
         # 4. 调用 LLM 进行回复
         if getattr(self.plugin, "passive_memory_enabled", False):
@@ -749,7 +760,7 @@ class ReplyPipeline:
                             review_user_profiles.append(
                                 {
                                     "user_id": uid,
-                                    "user_profile": await self.plugin.data_cache.get_user_profile_record(
+                                    "user_profile": await self.plugin.db.get_user_call_names(
                                         bot_name=bot_name,
                                         group_or_user_id=group_or_user_id,
                                         user_id=uid,
@@ -848,10 +859,25 @@ class ReplyPipeline:
             tool_results = []
 
         # Dispatcher 已经在对应输出顺序位置执行了 XML 工具。
-        tool_results.extend(llm_result.xml_tool_results)
+        turn_receipts = [
+            receipt
+            for receipt in llm_result.xml_tool_results
+            if not receipt.get("delegation_busy")
+        ]
+        # Give capacity feedback once when the turn only returned busy receipts.
+        if (
+            not turn_receipts
+            and llm_result.xml_tool_results
+            and times + 1 < max_loop
+            and not any(receipt.get("delegation_busy") for receipt in tool_results)
+        ):
+            turn_receipts = llm_result.xml_tool_results[:1]
+        tool_results.extend(turn_receipts)
 
         # 10. 判断是否需要继续循环迭代
-        if llm_result.tools_to_call or llm_result.xml_tool_results:
+        if (llm_result.tools_to_call and not llm_result.xml_tool_results) or any(
+            "delegated" not in receipt for receipt in turn_receipts
+        ):
             logger.debug(f"{bot_name} llm step {times + 1} ...")
             async for chunk in self.dispatch_llm_reply_loop(
                 event=event,
@@ -872,5 +898,6 @@ class ReplyPipeline:
                 tool_context=tool_context,
                 cross_group_context=cross_group_context,
                 cross_group_names=cross_group_names,
+                delegation_delivery=delegation_delivery,
             ):
                 yield chunk

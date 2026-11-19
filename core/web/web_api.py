@@ -3,6 +3,7 @@ from .bot_status_api import BotStatusApi
 from .chat_history_api import ChatHistoryApi
 from .dashboard_api import DashboardApi
 from .forward_api import ForwardApi
+from .lancedb_api import LanceDBApi
 from .media_api import MediaApi
 from .memory_api import MemoryApi
 from .model_health_api import ModelHealthApi
@@ -23,6 +24,7 @@ class GiftiaWebApi(
     TokenApi,
     ChatHistoryApi,
     MemoryApi,
+    LanceDBApi,
     BotStatusApi,
     TaskApi,
     SlangApi,

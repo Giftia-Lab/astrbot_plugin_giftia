@@ -112,11 +112,21 @@ class BotStatusRepository(BaseRepository):
         await self.conn.commit()
 
     @serialized_operation
-    async def delete_bot_status(self, group_or_user_id: str, bot_name: str):
-        await self.conn.execute(
+    async def delete_bot_status(
+        self, group_or_user_id: str, bot_name: str, *, status_id: int | None = None
+    ) -> None:
+        """Delete stored status for a conversation.
+
+        Args:
+            group_or_user_id: Owning conversation ID.
+            bot_name: Owning bot name.
+            status_id: Expected row ID, if deleting a specific status record.
+        """
+        async with self.conn.execute(
             """
             DELETE FROM bot_status WHERE group_or_user_id = ? AND bot_name = ?
+                AND (? IS NULL OR id = ?)
             """,
-            (group_or_user_id, bot_name),
-        )
-        await self.conn.commit()
+            (group_or_user_id, bot_name, status_id, status_id),
+        ):
+            await self.conn.commit()

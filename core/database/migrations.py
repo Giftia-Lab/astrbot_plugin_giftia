@@ -572,6 +572,43 @@ async def _migrate_to_v8(conn: aiosqlite.Connection) -> None:
     )
 
 
+DELEGATION_V9 = (
+    """CREATE TABLE IF NOT EXISTS delegated_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, bot_name TEXT NOT NULL,
+        origin TEXT NOT NULL, session_id TEXT NOT NULL, creation_key TEXT NOT NULL,
+        instruction TEXT NOT NULL, revision INTEGER NOT NULL, remaining INTEGER NOT NULL,
+        status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '',
+        UNIQUE(bot_name, origin, creation_key)
+    )""",
+    """CREATE TABLE IF NOT EXISTS delegated_steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
+        revision INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL,
+        input_key TEXT, UNIQUE(task_id, input_key)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_delegated_scope
+       ON delegated_tasks(bot_name, origin, status)""",
+)
+
+
+async def _migrate_to_v9(conn: aiosqlite.Connection) -> None:
+    """Store delegated transcripts separately from conversation history.
+
+    Args:
+        conn: Database connection being initialized.
+    """
+    for statement in DELEGATION_V9:
+        await conn.execute(statement)
+
+
+async def _migrate_to_v10(conn: aiosqlite.Connection) -> None:
+    """Allow persisted OneBot membership summaries beside existing group names.
+
+    Args:
+        conn: Database connection being initialized.
+    """
+    await _add_missing_columns(conn, "group_metadata", (("onebot_snapshot", "TEXT"),))
+
+
 # Schema versions are independent of plugin releases; released steps stay frozen.
 MIGRATIONS = (
     (1, _migrate_legacy_to_v1),
@@ -582,6 +619,8 @@ MIGRATIONS = (
     (6, _migrate_to_v6),
     (7, _migrate_to_v7),
     (8, _migrate_to_v8),
+    (9, _migrate_to_v9),
+    (10, _migrate_to_v10),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

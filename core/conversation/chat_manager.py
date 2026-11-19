@@ -6,9 +6,10 @@ import uuid
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 from aiocqhttp import CQHttp
 
@@ -149,6 +150,7 @@ class SessionState:
     task: asyncio.Task | None = None
     last_started: float = float("-inf")
     effects_started: bool = False
+    waiting_agent: bool = False
 
 
 class ChatManager:
@@ -597,12 +599,14 @@ class ChatManager:
         if message.message_id in state.seen:
             return
         busy = state.task is not None and not state.task.done()
+        delegations = getattr(self.plugin, "delegations", None)
         trigger = self.decision_engine.get_trigger(
             event,
             bot_name,
             group_or_user_id,
             message,
             continuation=busy
+            or bool(delegations and delegations.active(*key))
             or self.plugin.replying_status.get(f"{bot_name}:{group_or_user_id}", 0) > 0,
         )
         if trigger is None:
@@ -886,6 +890,7 @@ class ChatManager:
                 # The shared AstrBot lock also serializes reminders and media callbacks.
                 async with session_lock_manager.acquire_lock(event.unified_msg_origin):
                     state.effects_started = False
+                    state.waiting_agent = False
                     regenerate_after_id = review_retry
                     is_review_retry = review_retry is not None
                     review_retry = None
@@ -1136,7 +1141,9 @@ class ChatManager:
                             bot_name,
                             group_or_user_id,
                             state.current,
-                            "handled" if completed else "skipped",
+                            ("waiting_agent" if state.waiting_agent else "handled")
+                            if completed
+                            else "skipped",
                         )
                     except ReplyReviewRejected:
                         # Keep every original target at the queue head. Database
@@ -1220,6 +1227,7 @@ class ChatManager:
         *,
         review_after_id: int | None = None,
         review_context: str = "",
+        delegation_result: str = "",
     ) -> bool:
         """Generate and dispatch one frozen batch under the shared session lock.
 
@@ -1234,6 +1242,7 @@ class ChatManager:
             meme_tags: Decision-selected sticker search tags.
             review_after_id: Input watermark, omitted after a rejected draft.
             review_context: Deferred arrivals that must still inform regeneration.
+            delegation_result: Compact worker report claimed under the session lock.
 
         Returns:
             Whether the reply finished normally, including intentional silence.
@@ -1259,6 +1268,11 @@ class ChatManager:
                 meme_tags=meme_tags,
                 review_after_id=review_after_id,
                 other_data=[review_context] if review_context else None,
+                **(
+                    {"remind_message": delegation_result, "delegation_delivery": True}
+                    if delegation_result
+                    else {}
+                ),
             ):
                 if not all(
                     self.decision_engine.check_whitelists(item.event)
@@ -1278,6 +1292,10 @@ class ChatManager:
                         group_or_user_id=group_or_user_id,
                         llm_result=chunk,
                     )
+                    if any(
+                        receipt.get("waiting") for receipt in chunk.xml_tool_results
+                    ):
+                        state.waiting_agent = True
                     has_tts_reply = (
                         bool(chunk.tts_segments)
                         and hasattr(self.plugin, "tts_manager")
@@ -1311,6 +1329,85 @@ class ChatManager:
             self.plugin.replying_status[reply_key] = max(
                 0, self.plugin.replying_status.get(reply_key, 0) - 1
             )
+
+    async def deliver_delegation(self, event, task, source_ids) -> bool:
+        """Resume a claimed task with fresh history and its original reply targets.
+
+        Args:
+            event: Current authorized conversation event.
+            task: SQLite task row claimed under the session lock.
+            source_ids: Original and supplemental user message IDs in input order.
+
+        Returns:
+            Whether the formal reply completed under the current access rules.
+        """
+        bot_name, session = task["bot_name"], task["session_id"]
+        current = []
+        blocked = (
+            self.plugin.bot_map[bot_name]
+            .get("blocked_users", {})
+            .get(event.unified_msg_origin, [])
+        )
+        for mid in source_ids:
+            msg = await self.plugin.db.get_message_by_id(
+                bot_name=bot_name, group_or_user_id=session, message_id=mid
+            )
+            if msg and not msg.is_recalled and msg.user_id not in blocked:
+                current.append(QueuedMessage(event, msg, True, time.monotonic(), 0))
+        if source_ids and not current:
+            return False
+        base_limit = getattr(self.plugin, "reply_message_truncate_limit", 1500)
+        if base_limit is None:
+            base_limit = 1500
+        report_limit = 0 if base_limit <= 0 else max(int(base_limit), 6000)
+        report = truncate_message_content(task["result"], report_limit)
+        logger.info(
+            "[Giftia Subagent] 唤醒主人格投递汇报: task_id=%s, revision=%s, bot=%s, session=%s, result_len=%s, delivered_len=%s",
+            task["id"],
+            task["revision"],
+            bot_name,
+            session,
+            len(task["result"] or ""),
+            len(report),
+        )
+        recent = await self.plugin.data_cache.get_recent_message(
+            bot_name, session, self.plugin.msg_number
+        )
+        completed = await self._reply_batch(
+            event,
+            bot_name,
+            session,
+            SessionState(current=current),
+            recent,
+            None,
+            [],
+            None,
+            delegation_result=(
+                f"后台子任务 #{task['id']} 已结束。请结合原问题、补充要求和最新会话回复。\n"
+                f"委派目标：{escape(task['instruction'])}\n"
+                f"汇报内容：\n{escape(report)}"
+            ),
+        )
+        if completed:
+            await self.plugin.data_cache.add_message(
+                bot_name,
+                session,
+                MessageData(
+                    message_id=f"delegate_{task['id']}_{task['revision']}_report",
+                    user_id=str(event.get_self_id()),
+                    nickname=self.plugin.bot_map[bot_name].get("nickname") or bot_name,
+                    group_or_user_id=session,
+                    role="operation_log",
+                    time=datetime.now().isoformat(),
+                    content=(
+                        f"<subagent_result task_id={quoteattr(str(task['id']))} "
+                        f"instruction={quoteattr(task['instruction'])}>\n"
+                        f"{escape(report)}\n"
+                        "</subagent_result>"
+                    ),
+                ),
+            )
+        return completed
 
     def get_platform_adapter(
         self, adapter_id: str

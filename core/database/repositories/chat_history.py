@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -376,23 +376,87 @@ class ChatHistoryRepository(BaseRepository):
         if not users:
             return {}
         placeholders = ",".join("?" for _ in users)
+        now = datetime.now().timestamp()
+        cutoff = now - 20 * 60
+        day_seconds = 24 * 60 * 60
+        first_day = datetime.fromtimestamp(cutoff - day_seconds, timezone.utc).date()
+        last_day = datetime.fromtimestamp(now + day_seconds, timezone.utc).date()
+        # Keep ISO forms SQLite cannot parse only on dates that could be recent
+        # in any offset, for example compact calendar dates and ISO week dates.
+        legacy_patterns = set()
+        for days in range((last_day - first_day).days + 1):
+            day = first_day + timedelta(days=days)
+            date_text = day.isoformat()
+            year, week, _ = day.isocalendar()
+            legacy_patterns.update(
+                (
+                    f"{date_text}*",
+                    f"{date_text.replace('-', '')}*",
+                    f"{year:04d}-W{week:02d}*",
+                    f"{year:04d}W{week:02d}*",
+                )
+            )
+        # Compare naive strings as local wall time, including both offsets near
+        # clock changes. The exact check below preserves folds and microseconds.
+        local_offsets = [
+            datetime.fromtimestamp(epoch, timezone.utc)
+            .astimezone()
+            .utcoffset()
+            .total_seconds()
+            for epoch in (cutoff - day_seconds, cutoff, now, now + day_seconds)
+        ]
+        # SQLite rounds timestamps to milliseconds.
+        lower, upper = cutoff - 0.001, now + 0.001
         async with self.conn.execute(
             f"""
+            WITH pending AS (
+                SELECT id, user_id, group_or_user_id, created_at,
+                       COALESCE(
+                           julianday(created_at),
+                           CASE
+                               WHEN substr(created_at, 12) GLOB '*[+-][0-9][0-9][0-9][0-9]'
+                               THEN julianday(
+                                   substr(created_at, 1, length(created_at) - 2) ||
+                                   ':' || substr(created_at, -2)
+                               )
+                               WHEN substr(created_at, 12) GLOB '*[+-][0-9][0-9]'
+                               THEN julianday(created_at || ':00')
+                           END
+                       ) AS parsed_time
+                FROM chat_history
+                WHERE bot_name = ? AND user_id IN ({placeholders})
+                  AND group_or_user_id IS NOT NULL AND group_or_user_id != ''
+                  AND group_or_user_id != ? AND group_or_user_id != user_id
+                  AND memory_status = 'pending'
+                  AND COALESCE(role, 'message') = 'message'
+                  AND COALESCE(is_recalled, 0) = 0
+                  AND typeof(created_at) = 'text'
+            )
             SELECT id, user_id, group_or_user_id, created_at
-            FROM chat_history
-            WHERE bot_name = ? AND user_id IN ({placeholders})
-              AND group_or_user_id IS NOT NULL AND group_or_user_id != ''
-              AND group_or_user_id != ? AND group_or_user_id != user_id
-              AND memory_status = 'pending'
-              AND COALESCE(role, 'message') = 'message'
-              AND COALESCE(is_recalled, 0) = 0
+            FROM pending
+            WHERE CASE
+                WHEN parsed_time IS NULL THEN EXISTS (
+                    SELECT 1 FROM json_each(?) WHERE pending.created_at GLOB value
+                )
+                WHEN substr(created_at, 12) GLOB '*[+Z-]*' THEN
+                    parsed_time BETWEEN julianday(?, 'unixepoch') AND julianday(?, 'unixepoch')
+                ELSE parsed_time BETWEEN julianday(?, 'unixepoch') AND julianday(?, 'unixepoch')
+            END
             ORDER BY id DESC
             """,
-            (bot_name, *users, session_id),
+            (
+                bot_name,
+                *users,
+                session_id,
+                json.dumps(sorted(legacy_patterns)),
+                lower,
+                upper,
+                lower + min(local_offsets),
+                upper + max(local_offsets),
+            ),
         ) as cursor:
             rows = await cursor.fetchall()
 
-        now = datetime.now().timestamp()
         anchors = {}
         for row in rows:
             try:
@@ -641,6 +705,15 @@ class ChatHistoryRepository(BaseRepository):
 
     @serialized_operation
     async def delete_chat_history(self, bot_name: str, group_or_user_id: str):
+        await self.conn.execute(
+            "DELETE FROM delegated_steps WHERE task_id IN "
+            "(SELECT id FROM delegated_tasks WHERE bot_name=? AND session_id=?)",
+            (bot_name, group_or_user_id),
+        )
+        await self.conn.execute(
+            "DELETE FROM delegated_tasks WHERE bot_name=? AND session_id=?",
+            (bot_name, group_or_user_id),
+        )
         await self.conn.execute(
             """
             DELETE FROM forwarded_message WHERE group_or_user_id = ? AND bot_name = ?

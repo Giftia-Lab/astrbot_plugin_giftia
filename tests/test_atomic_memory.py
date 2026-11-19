@@ -822,7 +822,7 @@ async def test_quoted_only_content_and_unavailable_media_are_not_direct_evidence
 async def test_media_references_cannot_bypass_source_validation(runtime, fault):
     from xml.etree.ElementTree import fromstring
 
-    msg = await message(runtime, "[图片:image]")
+    msg = await message(runtime, "[图片:image][尺寸:24×12px, 大小:2.0KB]")
     msg.media_id_list = ["image"]
     media = {"image": {"caption": "一张聊天截图"}}
     if fault == "unattached":

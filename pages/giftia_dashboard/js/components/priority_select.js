@@ -56,7 +56,7 @@ class PrioritySelectComponent {
                             <circle cx="11" cy="11" r="8"></circle>
                             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                         </svg>
-                        <input type="text" class="priority-search-input" placeholder="${escapeHtml(this.placeholder)}">
+                        <input type="text" id="${escapeHtml(this.containerId)}-input" class="priority-search-input" placeholder="${escapeHtml(this.placeholder)}">
                     </div>
 
                     <div class="priority-dropdown" style="display: none;"></div>

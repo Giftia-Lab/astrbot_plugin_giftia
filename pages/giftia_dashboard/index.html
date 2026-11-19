@@ -209,6 +209,22 @@
 
             <!-- TAB 2: Memories -->
             <section id="tab-memories" class="tab-panel">
+                <details id="memory-lancedb" class="card lancedb-version-card">
+                    <summary>LanceDB 版本 <span data-lancedb-running class="muted-text" aria-live="polite">正在读取…</span></summary>
+                    <div class="lancedb-version-content">
+                        <p class="muted-text">已安装 <strong data-lancedb-installed>—</strong> · Giftia 支持 <code data-lancedb-range>—</code></p>
+                        <div class="filter-row">
+                            <button type="button" class="btn btn-secondary" data-lancedb-check disabled>检查可用版本</button>
+                            <div class="filter-group" data-lancedb-picker hidden>
+                                <select aria-label="目标 LanceDB 版本" data-lancedb-choice></select>
+                            </div>
+                            <button type="button" class="btn btn-primary" data-lancedb-plan hidden disabled>计划切换</button>
+                            <button type="button" class="btn btn-secondary" data-lancedb-cancel hidden>取消切换</button>
+                        </div>
+                        <p data-lancedb-message class="muted-text" role="status"></p>
+                    </div>
+                </details>
+
                 <div class="filter-card card flex-between">
                     <div class="filter-row flex-grow">
                         <div class="filter-group">
@@ -1619,6 +1635,7 @@
                     <button type="button" class="card-tab-btn" data-subtab="subtab-trigger" onclick="switchBotModalSubTab('subtab-trigger')">触发与接话策略</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-decision" onclick="switchBotModalSubTab('subtab-decision')">前置决策</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-reply" onclick="switchBotModalSubTab('subtab-reply')">正式回复</button>
+                    <button type="button" class="card-tab-btn" data-subtab="subtab-subagent" onclick="switchBotModalSubTab('subtab-subagent')">子 Agent</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-tts" onclick="switchBotModalSubTab('subtab-tts')">TTS</button>
                     <button type="button" class="card-tab-btn" data-subtab="subtab-interactive" onclick="switchBotModalSubTab('subtab-interactive')">内置交互功能</button>
                 </div>
@@ -1766,7 +1783,18 @@
                     </div>
                 </div>
 
-                <!-- Sub-tab 4: TTS XML Conf -->
+                <div id="subtab-subagent" class="bot-subtab-content" style="display: none;">
+                    <div class="form-group">
+                        <label for="bot-form-subagent-providers-input">子 Agent 模型供应商</label>
+                        <div id="bot-form-subagent-providers" class="tag-select-container"></div>
+                    </div>
+                    <div class="form-group">
+                        <label for="bot-form-subagent-tools-input">子 Agent 可用工具 <span class="info-tooltip" data-tooltip="所选工具由子 Agent 独占。工具留空时关闭委派。"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></label>
+                        <div id="bot-form-subagent-tools" class="tag-select-container"></div>
+                    </div>
+                </div>
+
+                <!-- TTS XML Conf -->
                 <div id="subtab-tts" class="bot-subtab-content" style="display: none;">
                     <div class="form-row form-row-switch" style="margin-bottom: 12px;">
                         <div style="flex: 1;">
