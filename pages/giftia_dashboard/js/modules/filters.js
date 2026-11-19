@@ -245,6 +245,7 @@ export function loadActiveTabData() {
     if (state.activeTab === "chat-history") {
         initializeScopedView("history");
     } else if (state.activeTab === "memories") {
+        app.loadLanceDBVersion();
         initializeScopedView("memories");
     } else if (state.activeTab === "bot-status") {
         app.loadBotStatus();

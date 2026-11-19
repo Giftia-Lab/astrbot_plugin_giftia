@@ -41,6 +41,7 @@ from .core.llm.native_tools import (
 )
 from .core.llm.provider_health import get_provider_health
 from .core.llm.xml_parse import XmlParse
+from .core.memory.lancedb_versions import LanceDBVersions
 from .core.memory.memory import LTM
 from .core.memory.passive_memory import PassiveMemoryManager
 from .core.reports.service import ReportService
@@ -200,6 +201,8 @@ class Giftia(Star):
         """插件初始化方法"""
         # 实例化底座服务
         self.db = await Database.connect()
+        self.lancedb_versions = LanceDBVersions(self.db, self.http_manager.session)
+        await self.lancedb_versions.apply_pending()
         self.ltm = LTM(
             self.context, self.embedding_conf, self.rerank_conf, self.db.log_token_usage
         )

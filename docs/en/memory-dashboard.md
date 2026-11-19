@@ -16,6 +16,16 @@ Open Giftia WebUI from the AstrBot plugin page and select **长期记忆 (Long-t
 
 Management pages and administrator commands handle deletion; the bot queries memories through `search_memory`. Directly supported personality, interest and agreement information is stored as individual facts.
 
+## LanceDB versions
+
+Expand **LanceDB 版本 (LanceDB version)** in **长期记忆 (Long-term memory)** to see the running version, installed version and supported range. **检查可用版本 (Check available versions)** lists stable PyPI releases with wheels for the current Python and platform. Choose the latest listed release or an older one.
+
+Select a target and confirm **计划切换 (Schedule switch)**. On a full AstrBot restart, Giftia uses AstrBot's configured package index to install the release before loading LanceDB. You can cancel the switch before restarting. If installation fails, the panel shows the failure and the AstrBot log contains the details.
+
+![LanceDB running version, target version and restart prompt, using sample data](../images/lancedb-version.jpg)
+
+The switch affects other plugins using LanceDB in the same Python environment. Back up the Giftia data directory before downgrading because older releases may be unable to read newer vector indexes. On the packaged desktop runtime, use the AstrBot console to switch versions. Use the console and restart AstrBot if another plugin loads LanceDB before Giftia.
+
 ## Group names and IDs
 
 Conversation filters, group rule cards, conversation status and merged forwards display **Group name (group ID)** when a name is known, falling back to the ID otherwise. The **群聊 (Group)** filter in group rules offers name suggestions and also accepts a raw ID. Filtering, copying IDs and editing continue to use the original ID.

@@ -35,6 +35,7 @@ class LTM:
     ):
         import lancedb
 
+        self.lancedb_version = getattr(lancedb, "__version__", None)
         self.context = context
         self.embedding_conf = embedding_conf
         self.rerank_conf = rerank_conf

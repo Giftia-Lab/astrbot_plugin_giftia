@@ -209,6 +209,22 @@
 
             <!-- TAB 2: Memories -->
             <section id="tab-memories" class="tab-panel">
+                <details id="memory-lancedb" class="card lancedb-version-card">
+                    <summary>LanceDB 版本 <span data-lancedb-running class="muted-text" aria-live="polite">正在读取…</span></summary>
+                    <div class="lancedb-version-content">
+                        <p class="muted-text">已安装 <strong data-lancedb-installed>—</strong> · Giftia 支持 <code data-lancedb-range>—</code></p>
+                        <div class="filter-row">
+                            <button type="button" class="btn btn-secondary" data-lancedb-check disabled>检查可用版本</button>
+                            <div class="filter-group" data-lancedb-picker hidden>
+                                <select aria-label="目标 LanceDB 版本" data-lancedb-choice></select>
+                            </div>
+                            <button type="button" class="btn btn-primary" data-lancedb-plan hidden disabled>计划切换</button>
+                            <button type="button" class="btn btn-secondary" data-lancedb-cancel hidden>取消切换</button>
+                        </div>
+                        <p data-lancedb-message class="muted-text" role="status"></p>
+                    </div>
+                </details>
+
                 <div class="filter-card card flex-between">
                     <div class="filter-row flex-grow">
                         <div class="filter-group">
