@@ -600,6 +600,15 @@ async def _migrate_to_v9(conn: aiosqlite.Connection) -> None:
         await conn.execute(statement)
 
 
+async def _migrate_to_v10(conn: aiosqlite.Connection) -> None:
+    """Allow persisted OneBot membership summaries beside existing group names.
+
+    Args:
+        conn: Database connection being initialized.
+    """
+    await _add_missing_columns(conn, "group_metadata", (("onebot_snapshot", "TEXT"),))
+
+
 # Schema versions are independent of plugin releases; released steps stay frozen.
 MIGRATIONS = (
     (1, _migrate_legacy_to_v1),
@@ -611,6 +620,7 @@ MIGRATIONS = (
     (7, _migrate_to_v7),
     (8, _migrate_to_v8),
     (9, _migrate_to_v9),
+    (10, _migrate_to_v10),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

@@ -129,20 +129,34 @@ def runtime():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["reply", "decision"])
+@pytest.mark.parametrize("onebot", [False, True])
 async def test_existing_group_queries_backfill_names_without_an_extra_request(
-    runtime, tmp_path, monkeypatch, stage
+    runtime, tmp_path, monkeypatch, stage, onebot
 ):
     monkeypatch.setenv("ASTRBOT_ROOT", str(tmp_path))
     async with aiosqlite.connect(":memory:") as conn:
         conn.row_factory = aiosqlite.Row
         await initialize_database(conn)
         runtime.cache.db = Database(conn)
-        runtime.event.get_group.return_value = Group(
-            group_id="group", group_name='讨论群 & "A"'
-        )
+        name = '讨论群 & "A"'
+        if onebot:
+            runtime.event.get_platform_name = lambda: "aiocqhttp"
+            await runtime.cache.db.upsert_group_metadata(
+                "bot",
+                "group",
+                name,
+                1,
+                onebot_snapshot={"owner_id": "42", "member_count": 3},
+            )
+            runtime.event.bot = SimpleNamespace(call_action=AsyncMock())
+        else:
+            runtime.event.get_group.return_value = Group(
+                group_id="group", group_name=name
+            )
         targets = [MessageData(message_id="A", user_id="alice", content="hello")]
         if stage == "reply":
             await runtime.run(reply_messages=targets)
+            call = runtime.plugin.call_llm.call_llm_reply
         else:
             runtime.plugin.active_reply_counters = {}
             runtime.plugin.bot_map["bot"]["decision_conf"] = {
@@ -155,10 +169,73 @@ async def test_existing_group_queries_backfill_names_without_an_extra_request(
             await DecisionEngine(runtime.plugin).evaluate_decision(
                 runtime.event, "bot", "Bot", "group", targets, []
             )
+            call = runtime.plugin.call_llm.call_llm_decision
         assert await runtime.cache.db.get_group_names("bot", ["group"]) == {
-            "group": '讨论群 & "A"'
+            "group": name
         }
-        runtime.event.get_group.assert_awaited_once_with("group")
+        assert f"Name: {name}" in call.await_args.kwargs["user_prompt"]
+        if onebot:
+            assert "Owner ID: 42" in call.await_args.kwargs["user_prompt"]
+            runtime.event.get_group.assert_not_awaited()
+            runtime.event.bot.call_action.assert_not_awaited()
+        else:
+            runtime.event.get_group.assert_awaited_once_with("group")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["decision", "reply"])
+async def test_prompt_aggregates_affinity_once_per_user_on_cold_and_warm_reads(
+    runtime, tmp_path, monkeypatch, stage
+):
+    monkeypatch.setenv("ASTRBOT_ROOT", str(tmp_path))
+    async with aiosqlite.connect(":memory:") as conn:
+        conn.row_factory = aiosqlite.Row
+        await initialize_database(conn)
+        db = runtime.cache.db = runtime.plugin.db = Database(conn)
+        for name in (
+            "get_user_profile_record",
+            "get_user_relation",
+            "build_active_user_briefs",
+        ):
+            monkeypatch.delattr(runtime.cache, name)
+        await conn.executemany(
+            "INSERT INTO user_profiles (bot_name, user_id, base_relation) VALUES ('bot', ?, ?)",
+            [("alice", 7), ("history", -50)],
+        )
+        await conn.commit()
+        spy = AsyncMock(wraps=db.get_relation_score)
+        monkeypatch.setattr(db, "get_relation_score", spy)
+        runtime.plugin.embedding_conf["enabled"] = False
+        targets = [
+            MessageData(message_id="A", user_id="alice", content="hello"),
+            MessageData(message_id="B", user_id="alice", content="again"),
+            MessageData(message_id="C", user_id="no-profile", content="new"),
+        ]
+        history = [MessageData(message_id="H", user_id="history", content="earlier")]
+        runtime.plugin.active_reply_counters = {}
+        runtime.plugin.bot_map["bot"]["decision_conf"] = {"provider_ids": ["decision"]}
+        runtime.plugin.call_llm.call_llm_decision = AsyncMock(
+            return_value=Decision(reply_decision=0, use_rag=0)
+        )
+        engine = DecisionEngine(runtime.plugin)
+        for _ in range(2):
+            spy.reset_mock()
+            if stage == "decision":
+                await engine.evaluate_decision(
+                    runtime.event, "bot", "Bot", "group", targets, history
+                )
+                call = runtime.plugin.call_llm.call_llm_decision
+            else:
+                await runtime.run(recent_messages=history, reply_messages=targets)
+                call = runtime.plugin.call_llm.call_llm_reply
+            scored = [
+                call.kwargs["user_id"] if call.kwargs else call.args[2]
+                for call in spy.await_args_list
+            ]
+            assert sorted(scored) == ["alice", "history", "no-profile"]
+            prompt = call.await_args.kwargs["user_prompt"]
+            assert "57.0" in prompt
+            assert "好感度：0.0" in prompt
 
 
 @pytest.mark.asyncio
@@ -645,14 +722,13 @@ async def test_media_without_a_completed_nonempty_caption_never_triggers_search(
                 is_captioned=caption_state != "unfinished",
             )
         ]
+    content = f"[{media_type}:media]"
+    if media_type == "图片":
+        content += "[尺寸:24×12px, 大小:2.0KB]"
     result = await runtime.pipeline._search_current_recall_memories(
         "bot",
         "group",
-        [
-            MessageData(
-                user_id="alice", nickname="Alice", content=f"[{media_type}:media]"
-            )
-        ],
+        [MessageData(user_id="alice", nickname="Alice", content=content)],
         None,
         [],
         media_captions=captions,

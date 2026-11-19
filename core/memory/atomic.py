@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from ..utils.schemas import IMAGE_METADATA_PATTERN
+
 
 class DirectSpeech(HTMLParser):
     """Extract direct speech while excluding serialized quotation blocks."""
@@ -213,7 +215,7 @@ def validate_memory_records(
             if msg is None:
                 raise ValueError("Evidence is outside the new message batch")
             speech = DirectSpeech(msg.content or "")
-            direct = "".join(speech.parts)
+            direct = IMAGE_METADATA_PATTERN.sub(r"\1", "".join(speech.parts))
             if direct.lstrip().startswith("/"):
                 raise ValueError("Commands cannot establish memory evidence")
             media_ids = []

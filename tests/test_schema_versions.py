@@ -61,7 +61,7 @@ async def test_model_usage_upgrade_preserves_existing_statistics(database):
 async def test_group_metadata_upgrade_preserves_rules_and_names_on_restart(database):
     await database.execute("BEGIN")
     for version, migration in migrations.MIGRATIONS:
-        if version >= 6:
+        if version >= 10:
             break
         await migration(database)
         await database.execute(f"PRAGMA user_version={version}")
@@ -69,24 +69,27 @@ async def test_group_metadata_upgrade_preserves_rules_and_names_on_restart(datab
         "INSERT INTO group_profiles (bot_name, group_or_user_id, profile) "
         "VALUES ('bot', '123', 'Existing group rules')"
     )
-    await database.commit()
-    await schema.initialize_database(database)
     await database.execute(
         "INSERT INTO group_metadata (bot_name, group_id, group_name, refreshed_at) "
         "VALUES ('bot', '123', 'Group name', 1794268800)"
     )
     await database.commit()
-    await schema.initialize_database(database)
+    for _ in range(2):
+        await schema.initialize_database(database)
     async with database.execute("SELECT profile FROM group_profiles") as cursor:
         assert (await cursor.fetchone())[0] == "Existing group rules"
-    async with database.execute("SELECT group_name FROM group_metadata") as cursor:
-        assert (await cursor.fetchone())[0] == "Group name"
+    async with database.execute(
+        "SELECT group_name, onebot_snapshot FROM group_metadata"
+    ) as cursor:
+        assert await cursor.fetchone() == ("Group name", None)
     assert await schema_version(database) == migrations.CURRENT_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("starting_version", [6, 7])
-async def test_upgrade_keeps_active_memos_and_unpinned_state(database, starting_version):
+async def test_upgrade_keeps_active_memos_and_unpinned_state(
+    database, starting_version
+):
     for version, migration in migrations.MIGRATIONS:
         if version > starting_version:
             break

@@ -18,11 +18,13 @@ REACTION_NOTICE_TYPES = [
     "group_msg_emoji_like",
     "friend_msg_emoji_like",
 ]
-GROUP_STATE_NOTICE_TYPES = {
+GROUP_MEMBER_NOTICE_TYPES = {
     "group_admin",
     "group_increase",
     "group_decrease",
     "group_card",
+}
+GROUP_STATE_NOTICE_TYPES = GROUP_MEMBER_NOTICE_TYPES | {
     "group_ban",
     "essence",
 }

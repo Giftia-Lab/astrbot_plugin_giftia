@@ -404,6 +404,7 @@ async def test_decision_passes_memories_and_all_pending_speaker_profiles(monkeyp
                 for name, value in {
                     "get_bot_status": None,
                     "get_group_profile": "",
+                    "get_group_prompt_data": "",
                     "get_user_profile_record": {},
                     "get_user_relation": None,
                     "build_active_user_briefs": [],

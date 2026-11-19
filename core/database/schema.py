@@ -16,6 +16,7 @@ TABLE_DEFINITIONS = (
         group_id TEXT NOT NULL,
         group_name TEXT NOT NULL,
         refreshed_at REAL NOT NULL,
+        onebot_snapshot TEXT,
         PRIMARY KEY (bot_name, group_id)
     )
     """,

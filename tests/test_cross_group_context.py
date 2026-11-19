@@ -1,5 +1,6 @@
 """Recent cross-group context preserves observed source conversations."""
 
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from xml.etree.ElementTree import fromstring
@@ -20,7 +21,11 @@ async def runtime(monkeypatch):
     monkeypatch.setattr(
         chat_history,
         "datetime",
-        SimpleNamespace(now=lambda: now, fromisoformat=datetime.fromisoformat),
+        SimpleNamespace(
+            now=lambda: now,
+            fromisoformat=datetime.fromisoformat,
+            fromtimestamp=datetime.fromtimestamp,
+        ),
     )
     async with aiosqlite.connect(":memory:") as conn:
         conn.row_factory = aiosqlite.Row
@@ -43,7 +48,11 @@ async def runtime(monkeypatch):
         ({"memory_status": "summarized"}, False),
         ({"role": "operation_log"}, False),
         ({"is_recalled": 1}, False),
+        ({"age_seconds": 0}, True),
+        ({"age_seconds": -0.000001}, False),
+        ({"age_seconds": 1199.999999}, True),
         ({"age_seconds": 1200}, True),
+        ({"age_seconds": 1200.000001}, False),
         ({"age_seconds": 1200.001}, False),
         ({"age_seconds": -1}, False),
         ({"created_at": "invalid"}, False),
@@ -105,6 +114,101 @@ async def test_latest_anchor_uses_actual_time_across_offsets_and_insertion_order
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "style", ["space", "compact_offset", "compact_date", "week_date"]
+)
+async def test_legacy_anchor_time_formats(runtime, style):
+    recent = runtime.now - timedelta(minutes=1)
+    if style == "space":
+        stored = recent.isoformat(sep=" ")
+    elif style == "compact_offset":
+        stored = recent.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime(
+            "%Y-%m-%dT%H:%M:%S%z"
+        )
+    elif style == "compact_date":
+        stored = recent.strftime("%Y%m%dT%H%M%S")
+    else:
+        year, week, weekday = recent.isocalendar()
+        stored = f"{year:04d}-W{week:02d}-{weekday}T{recent:%H:%M:%S}"
+    try:
+        datetime.fromisoformat(stored)
+    except ValueError:
+        pytest.skip("This interpreter's ISO parser does not support this format")
+
+    await runtime.db.conn.execute(
+        "INSERT INTO chat_history "
+        "(bot_name, group_or_user_id, user_id, message_id, memory_status, created_at) "
+        "VALUES ('bot', 'source', 'alice', 'legacy', 'pending', ?)",
+        (stored,),
+    )
+    await runtime.db.conn.commit()
+    result = await runtime.db.get_cross_group_pending_context(
+        "bot", "current", ["alice"]
+    )
+    assert [msg.time for msg in result["source"]] == [stored]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not hasattr(time, "tzset"), reason="Requires POSIX timezone switching"
+)
+@pytest.mark.parametrize(
+    "created_at,utc_now",
+    [
+        ("2026-10-25T02:05:00", "2026-10-25T00:15:00+00:00"),
+        ("2026-03-29T02:05:00", "2026-03-29T01:15:00+00:00"),
+    ],
+)
+async def test_naive_anchors_keep_local_clock_change_semantics(
+    runtime, monkeypatch, created_at, utc_now
+):
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("TZ", "Europe/Berlin")
+            time.tzset()
+            now = datetime.fromisoformat(utc_now)
+            patch.setattr(chat_history.datetime, "now", lambda: now)
+            await runtime.db.conn.execute(
+                "INSERT INTO chat_history "
+                "(bot_name, group_or_user_id, user_id, message_id, memory_status, created_at) "
+                "VALUES ('bot', 'source', 'alice', 'local', 'pending', ?)",
+                (created_at,),
+            )
+            await runtime.db.conn.commit()
+            result = await runtime.db.get_cross_group_pending_context(
+                "bot", "current", ["alice"]
+            )
+            assert [msg.message_id for msg in result["source"]] == ["local"]
+    finally:
+        time.tzset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("difference_us,source", [(0, "later_row"), (1, "earlier_row")])
+async def test_anchor_preserves_microsecond_order_and_breaks_ties_by_id(
+    runtime, difference_us, source
+):
+    recent = runtime.now - timedelta(minutes=1)
+    await runtime.db.conn.executemany(
+        "INSERT INTO chat_history "
+        "(bot_name, group_or_user_id, user_id, message_id, memory_status, created_at) "
+        "VALUES ('bot', ?, 'alice', 'anchor', 'pending', ?)",
+        [
+            (
+                "earlier_row",
+                (recent + timedelta(microseconds=difference_us)).isoformat(),
+            ),
+            ("later_row", recent.astimezone(timezone.utc).isoformat()),
+        ],
+    )
+    await runtime.db.conn.commit()
+    result = await runtime.db.get_cross_group_pending_context(
+        "bot", "current", ["alice"]
+    )
+    assert list(result) == [source]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("alice,bob", [(20, 25), (15, 45)])
 async def test_windows_include_ten_neighbors_and_merge_without_filling_gaps(
     runtime, alice, bob
@@ -159,7 +263,17 @@ async def test_windows_exclude_unseen_recalled_and_logs_without_changing_states(
         "(bot_name, group_or_user_id, user_id, message_id, memory_status, "
         "role, is_recalled, created_at) VALUES ('bot', 'source', ?, ?, ?, ?, ?, ?)",
         [
-            (user, mid, status, role, recalled, runtime.now.isoformat())
+            (
+                user,
+                mid,
+                status,
+                role,
+                recalled,
+                (
+                    runtime.now
+                    + timedelta(minutes={"before": -30, "bot-reply": 1}.get(mid, 0))
+                ).isoformat(),
+            )
             for user, mid, status, role, recalled in (
                 ("other", "unseen", "unseen", "message", 0),
                 ("other", "before", "summarized", "message", 0),

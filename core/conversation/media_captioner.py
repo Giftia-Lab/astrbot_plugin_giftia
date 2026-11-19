@@ -2,7 +2,6 @@ import asyncio
 import base64
 import copy
 import os
-import re
 from pathlib import Path
 
 from astrbot.api import logger
@@ -12,7 +11,7 @@ from astrbot.core.star.star_tools import StarTools
 
 from ..utils.http_manager import HttpManager
 from ..utils.path_security import get_safe_local_media_path
-from ..utils.schemas import MediaCaption, MessageData, XmlLlmResult, extract_media_ids
+from ..utils.schemas import MediaCaption, XmlLlmResult, extract_media_ids
 from ..utils.video_utils import (
     VIDEO_AUTO_COMPRESS_THRESHOLD_BYTES,
     VIDEO_MAX_PAYLOAD_BYTES,
@@ -25,61 +24,6 @@ from ..utils.video_utils import (
 class MediaCaptioner:
     def __init__(self, plugin):
         self.plugin = plugin
-
-    async def get_image_metadata(
-        self, recent_messages: list[MessageData]
-    ) -> dict[str, MediaCaption]:
-        """Load image metadata for replies and backfill only from local files.
-
-        Args:
-            recent_messages: Reply history and targets containing image identifiers.
-
-        Returns:
-            Image records indexed by media identifier, regardless of caption state.
-        """
-        hash_vals = dict.fromkeys(
-            media_id
-            for message in recent_messages
-            for media_id in re.findall(
-                r"\[图片:([a-fA-F0-9]{16,64})\]", message.content or ""
-            )
-        )
-        image_metadata = {}
-        for hash_val in hash_vals:
-            media = await self.plugin.data_cache.get_caption_by_hash(hash_val)
-            if not media or (media.media_type or "image").lower() != "image":
-                continue
-            if media.width <= 0 or media.height <= 0 or media.file_size <= 0:
-                cache_file = (
-                    StarTools.get_data_dir("astrbot_plugin_giftia")
-                    / "media_cache"
-                    / hash_val
-                )
-                try:
-                    image_bytes = await asyncio.to_thread(cache_file.read_bytes)
-                except FileNotFoundError:
-                    pass
-                except OSError as error:
-                    logger.debug(
-                        f"[Giftia] Failed to read cached image metadata for {hash_val}: {error}"
-                    )
-                else:
-                    width, height, file_size = await asyncio.to_thread(
-                        HttpManager.get_image_metadata, image_bytes
-                    )
-                    changed = False
-                    for field, value in (
-                        ("width", width),
-                        ("height", height),
-                        ("file_size", file_size),
-                    ):
-                        if value > 0 and getattr(media, field) <= 0:
-                            setattr(media, field, value)
-                            changed = True
-                    if changed:
-                        await self.plugin.data_cache.update_caption(media)
-            image_metadata[hash_val] = media
-        return image_metadata
 
     async def get_cached_media_captions(
         self,

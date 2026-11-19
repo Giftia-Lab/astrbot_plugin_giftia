@@ -146,7 +146,10 @@ class MessageParser:
 
         if group_id:
             try:
-                group = await event.get_group(group_id)
+                if getattr(event, "get_platform_name", lambda: "")() == "aiocqhttp":
+                    group = getattr(getattr(event, "message_obj", None), "group", None)
+                else:
+                    group = await event.get_group(group_id)
                 for member in getattr(group, "members", []) or []:
                     if str(getattr(member, "user_id", "")) == user_id:
                         nickname = getattr(member, "nickname", "")

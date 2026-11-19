@@ -1,4 +1,3 @@
-import asyncio
 import random
 import re
 
@@ -321,18 +320,22 @@ class DecisionEngine:
             decision_users[sender_id] = ""
         user_profiles = []
         for uid, nickname in decision_users.items():
-            user_profile, user_relation = await asyncio.gather(
-                self.plugin.data_cache.get_user_profile_record(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                ),
-                self.plugin.data_cache.get_user_relation(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                ),
+            user_profile = await self.plugin.data_cache.get_user_profile_record(
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
+                user_id=uid,
             )
+            if user_profile and "relation" in user_profile:
+                user_relation = (
+                    user_profile["relation"],
+                    user_profile.get("title") or "",
+                )
+            else:
+                user_relation = await self.plugin.data_cache.get_user_relation(
+                    bot_name=bot_name,
+                    group_or_user_id=group_or_user_id,
+                    user_id=uid,
+                )
             user_profiles.append(
                 {
                     "user_id": uid,
@@ -372,19 +375,10 @@ class DecisionEngine:
             recent_messages=all_for_caption,
         )
 
-        group_data = (
-            await event.get_group(event.get_group_id()) if event.get_group_id() else ""
-        )
-        if isinstance(getattr(group_data, "group_name", None), str):
-            await self.plugin.data_cache.remember_group_name(
-                bot_name,
-                str(event.get_group_id()),
-                group_data.group_name,
-                refreshed=True,
-            )
+        group_data = await self.plugin.data_cache.get_group_prompt_data(bot_name, event)
         user_prompt = build_decision_prompt(
             user_id=event.get_sender_id(),
-            group_data=str(group_data),
+            group_data=group_data,
             recent_messages=recent_messages,
             pending_messages=pending_messages,
             bot_status=bot_status,

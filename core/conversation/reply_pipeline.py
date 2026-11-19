@@ -19,7 +19,7 @@ from ..memory.recall_scope import (
     select_automatic_recall_memories,
 )
 from ..utils.anti_drool import filter_duplicate_replies
-from ..utils.schemas import MediaCaption, MessageData
+from ..utils.schemas import IMAGE_METADATA_PATTERN, MediaCaption, MessageData
 from .context_window import ContextWindows
 from .media_captioner import MediaCaptioner
 from .memory_recall import conf_float, conf_int, search_automatic_user_memories
@@ -158,7 +158,7 @@ class ReplyPipeline:
                 lambda match: (
                     "\n" + captions[match[1]] + "\n" if match[1] in captions else ""
                 ),
-                message.content or "",
+                IMAGE_METADATA_PATTERN.sub(r"\1", message.content or ""),
             ).strip()
             if not content:
                 continue
@@ -344,7 +344,6 @@ class ReplyPipeline:
             bot_name=bot_name,
             recent_messages=context_messages,
         )
-        image_metadata = await self.media_captioner.get_image_metadata(context_messages)
 
         if relevant_memories is None:
             relevant_memories = []
@@ -459,33 +458,23 @@ class ReplyPipeline:
         )
         user_profiles = []
         for uid, user_nickname in reply_users.items():
-            (
-                user_profile,
-                user_relation,
-                relation_changes,
-                relation_score,
-            ) = await asyncio.gather(
-                self.plugin.data_cache.get_user_profile_record(
+            user_profile = await self.plugin.data_cache.get_user_profile_record(
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
+                user_id=uid,
+            )
+            relation_score = user_profile
+            if not relation_score or "total_count" not in relation_score:
+                relation_score = await self.plugin.db.get_relation_score(
                     bot_name=bot_name,
                     group_or_user_id=group_or_user_id,
                     user_id=uid,
-                ),
-                self.plugin.data_cache.get_user_relation(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                ),
-                self.plugin.db.get_relation_changes(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                    limit=3,
-                ),
-                self.plugin.db.get_relation_score(
-                    bot_name=bot_name,
-                    group_or_user_id=group_or_user_id,
-                    user_id=uid,
-                ),
+                )
+            relation_changes = await self.plugin.db.get_relation_changes(
+                bot_name=bot_name,
+                group_or_user_id=group_or_user_id,
+                user_id=uid,
+                limit=3,
             )
             user_profiles.append(
                 {
@@ -494,7 +483,7 @@ class ReplyPipeline:
                     or (event.get_sender_name() if uid == sender_id else "")
                     or "",
                     "user_profile": user_profile,
-                    "user_relation": user_relation,
+                    "user_relation": None,
                     "relation_changes": relation_changes,
                     "relation_score": relation_score,
                     "common_groups": common_groups.get(uid, []),
@@ -591,16 +580,7 @@ class ReplyPipeline:
             )
 
         # 3. 构造回复提示词 Prompt
-        group_data = (
-            await event.get_group(event.get_group_id()) if event.get_group_id() else ""
-        )
-        if isinstance(getattr(group_data, "group_name", None), str):
-            await self.plugin.data_cache.remember_group_name(
-                bot_name,
-                str(event.get_group_id()),
-                group_data.group_name,
-                refreshed=True,
-            )
+        group_data = await self.plugin.data_cache.get_group_prompt_data(bot_name, event)
         prompt_extra = list(other_data or [])
         delegations = getattr(self.plugin, "delegations", None)
         if (
@@ -615,10 +595,9 @@ class ReplyPipeline:
             current_session_id=group_or_user_id,
             recent_messages=prompt_recent_messages,
             media_captions=media_captions,
-            image_metadata=image_metadata,
             reply_messages=prompt_reply_messages,
             remind_message=remind_message,
-            group_data=str(group_data),
+            group_data=group_data,
             bot_status=bot_status,
             tool_results=tool_results,
             session_recalled_memories=session_recalled_memories,
@@ -781,7 +760,7 @@ class ReplyPipeline:
                             review_user_profiles.append(
                                 {
                                     "user_id": uid,
-                                    "user_profile": await self.plugin.data_cache.get_user_profile_record(
+                                    "user_profile": await self.plugin.db.get_user_call_names(
                                         bot_name=bot_name,
                                         group_or_user_id=group_or_user_id,
                                         user_id=uid,

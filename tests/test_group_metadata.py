@@ -187,6 +187,177 @@ async def test_rename_notice_wins_over_a_lookup_already_in_flight(runtime):
 
 
 @pytest.mark.asyncio
+async def test_onebot_prompt_uses_persisted_snapshot_without_waiting_for_roster(
+    runtime,
+):
+    runtime.event.get_platform_name = lambda: "aiocqhttp"
+    runtime.event.get_group = AsyncMock(
+        side_effect=AssertionError("Blocking group lookup")
+    )
+    await runtime.db.upsert_group_metadata(
+        "bot", "123", "Existing name", runtime.clock.now
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def lookup(action, **params):
+        assert params == {"group_id": 123, "no_cache": True, "self_id": "999"}
+        if action == "get_group_info":
+            return {"group_id": 123, "group_name": "群 A", "member_count": 90}
+        assert action == "get_group_member_list"
+        started.set()
+        await release.wait()
+        return [
+            {"user_id": 99, "nickname": "Owner", "role": "owner"},
+            {"user_id": 100, "role": "admin"},
+        ]
+
+    runtime.event.bot.call_action.side_effect = lookup
+    cold = await runtime.cache.get_group_prompt_data("bot", runtime.event)
+    assert "Name: Existing name" in cold and "Admin IDs: N/A" in cold
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert await runtime.cache.get_group_prompt_data("bot", runtime.event) == cold
+    release.set()
+    await runtime.settle()
+
+    hot = await runtime.cache.get_group_prompt_data("bot", runtime.event)
+    assert "Name: 群 A" in hot
+    assert "Owner ID: 99" in hot
+    assert "Admin IDs: ['100']" in hot
+    assert "Member Count: 90" in hot
+    assert "Members Len: 2" in hot
+    assert "First Member: User ID: 99,Nickname: Owner" in hot
+    assert "onebot_snapshot" in await runtime.db.get_group_metadata("bot", "123")
+    changes = runtime.db.conn.total_changes
+    runtime.clock.now += 7 * 24 * 60 * 60
+    runtime.event.message_obj.group.group_name = "Unconfirmed name on a chat event"
+    restarted = DataCache(runtime.db, None, None, plugin=runtime.plugin)
+    await restarted.observe_group_metadata("bot", runtime.event)
+    assert await restarted.get_group_prompt_data("bot", runtime.event) == hot
+    assert runtime.event.bot.call_action.await_count == 2
+    assert runtime.db.conn.total_changes == changes
+    runtime.event.get_group.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "notice_type", ["group_increase", "group_decrease", "group_admin", "group_card"]
+)
+async def test_onebot_member_notices_refresh_the_existing_snapshot(
+    runtime, notice_type
+):
+    runtime.event.get_platform_name = lambda: "aiocqhttp"
+    await runtime.db.upsert_group_metadata(
+        "bot",
+        "123",
+        "群 A",
+        runtime.clock.now,
+        onebot_snapshot={"member_count": 5, "admin_ids": ["100"]},
+    )
+    runtime.event.bot.call_action.side_effect = [
+        {"group_id": 123, "group_name": "群 A", "member_count": "2"},
+        {
+            "status": "ok",
+            "retcode": 0,
+            "data": [
+                {"user_id": 101, "role": "owner"},
+                {"user_id": 102, "role": "admin"},
+            ],
+        },
+    ]
+    runtime.event.message_obj.raw_message = {
+        "post_type": "notice",
+        "notice_type": notice_type,
+    }
+    await runtime.cache.observe_group_metadata("bot", runtime.event)
+    assert "Admin IDs: ['100']" in await runtime.cache.get_group_prompt_data(
+        "bot", runtime.event
+    )
+    await runtime.settle()
+    assert runtime.event.bot.call_action.await_count == 2
+    assert "Admin IDs: ['102']" in await runtime.cache.get_group_prompt_data(
+        "bot", runtime.event
+    )
+    assert (await runtime.db.get_group_metadata("bot", "123"))["onebot_snapshot"][
+        "member_count"
+    ] == 2
+
+
+@pytest.mark.asyncio
+async def test_onebot_refresh_coalesces_arrivals_and_keeps_newer_rename(runtime):
+    runtime.event.get_platform_name = lambda: "aiocqhttp"
+    started, release = asyncio.Event(), asyncio.Event()
+    roster_requests = 0
+
+    async def lookup(action, **_):
+        nonlocal roster_requests
+        if action == "get_group_info":
+            return {"group_name": "新群名" if roster_requests else "旧群名"}
+        roster_requests += 1
+        if roster_requests == 1:
+            started.set()
+            await release.wait()
+            return [{"user_id": 1, "role": "owner"}]
+        return [{"user_id": 1, "role": "owner"}, {"user_id": 2, "role": "admin"}]
+
+    runtime.event.bot.call_action.side_effect = lookup
+    await runtime.cache.observe_group_metadata("bot", runtime.event)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    for notice_type in ("group_increase", "group_admin", "group_admin"):
+        runtime.event.message_obj.raw_message = {
+            "post_type": "notice",
+            "notice_type": notice_type,
+        }
+        await runtime.cache.observe_group_metadata("bot", runtime.event)
+    runtime.event.message_obj.raw_message = {
+        "post_type": "notice",
+        "notice_type": "notify",
+        "sub_type": "group_name",
+        "name_new": "新群名",
+    }
+    await runtime.cache.observe_group_metadata("bot", runtime.event)
+    release.set()
+    await runtime.settle()
+    assert roster_requests == 2
+    record = await runtime.db.get_group_metadata("bot", "123")
+    assert record["group_name"] == "新群名"
+    assert record["onebot_snapshot"]["admin_ids"] == ["2"]
+
+
+@pytest.mark.asyncio
+async def test_onebot_failed_member_refresh_keeps_the_snapshot_and_retries(runtime):
+    runtime.event.get_platform_name = lambda: "aiocqhttp"
+    original = {"member_count": 2, "admin_ids": ["100"]}
+    await runtime.db.upsert_group_metadata(
+        "bot", "123", "群 A", runtime.clock.now, onebot_snapshot=original
+    )
+    runtime.event.bot.call_action.side_effect = [
+        {"group_name": "群 A"},
+        {"status": "failed", "retcode": 1, "data": []},
+        {"group_name": "群 A"},
+        [{"user_id": 99, "role": "owner"}],
+    ]
+    runtime.event.message_obj.raw_message = {
+        "post_type": "notice",
+        "notice_type": "group_decrease",
+    }
+    await runtime.cache.observe_group_metadata("bot", runtime.event)
+    await runtime.settle()
+    assert (await runtime.db.get_group_metadata("bot", "123"))[
+        "onebot_snapshot"
+    ] == original
+    runtime.event.message_obj.raw_message = {}
+    await runtime.cache.observe_group_metadata("bot", runtime.event)
+    assert runtime.event.bot.call_action.await_count == 2
+
+    runtime.clock.monotonic += 61
+    await runtime.cache.observe_group_metadata("bot", runtime.event)
+    await runtime.settle()
+    assert runtime.event.bot.call_action.await_count == 4
+    snapshot = (await runtime.db.get_group_metadata("bot", "123"))["onebot_snapshot"]
+    assert snapshot["member_count"] == 1 and snapshot["admin_ids"] == []
+
+
+@pytest.mark.asyncio
 async def test_empty_names_and_private_messages_do_not_clear_or_create_group_metadata(
     runtime,
 ):

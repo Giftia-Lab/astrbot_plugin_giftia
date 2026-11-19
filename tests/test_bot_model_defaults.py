@@ -155,6 +155,7 @@ def runtime():
             get_recent_message=AsyncMock(return_value=[]),
             get_bot_status=AsyncMock(return_value=Status()),
             get_group_profile=AsyncMock(return_value=""),
+            get_group_prompt_data=AsyncMock(return_value=""),
             get_user_profile_record=AsyncMock(return_value={}),
             get_user_relation=AsyncMock(return_value=None),
             build_active_user_briefs=AsyncMock(return_value=[]),

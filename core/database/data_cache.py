@@ -11,12 +11,13 @@ from cachetools import LRUCache
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.platform.astrbot_message import MessageMember
 
 from ..memory.atomic import memory_metadata
 from ..memory.memory import LTM
 from ..memory.recall_scope import select_automatic_recall_memories
 from ..utils.http_manager import HttpManager
-from ..utils.notice_parse import NoticeParser
+from ..utils.notice_parse import GROUP_MEMBER_NOTICE_TYPES, NoticeParser
 from ..utils.schemas import (
     MediaCaption,
     MemoryItem,
@@ -33,6 +34,7 @@ ACCOUNT_TYPE_QUERY_TIMEOUT = 2.0
 ACCOUNT_TYPE_RETRY_INTERVAL = 60.0
 GROUP_NAME_REFRESH_INTERVAL = 24 * 60 * 60
 GROUP_NAME_QUERY_TIMEOUT = 2.0
+GROUP_MEMBER_QUERY_TIMEOUT = 10.0
 GROUP_NAME_RETRY_INTERVAL = 60.0
 
 
@@ -84,6 +86,7 @@ class DataCache:
         )
         self._group_metadata_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._group_metadata_retry_at: dict[tuple[str, str], float] = {}
+        self._group_metadata_pending: set[tuple[str, str]] = set()
         self.bot_status: dict[str, Status] = {}
         self._bot_status_write_lock = asyncio.Lock()
 
@@ -147,6 +150,7 @@ class DataCache:
                 now = datetime.now().timestamp()
                 await self.db.upsert_group_metadata(*key, group_name, now)
                 self.group_metadata[key] = {
+                    **record,
                     "group_name": group_name,
                     "refreshed_at": now,
                 }
@@ -161,7 +165,7 @@ class DataCache:
     async def observe_group_metadata(
         self, bot_name: str, event: AstrMessageEvent
     ) -> None:
-        """Observe inbound names and schedule one lightweight refresh when needed.
+        """Remember inbound names and schedule a refresh when the cache needs it.
 
         Args:
             bot_name: Owning bot configuration.
@@ -174,15 +178,34 @@ class DataCache:
         message = getattr(event, "message_obj", None)
         group_name = getattr(getattr(message, "group", None), "group_name", None)
         raw = getattr(message, "raw_message", None)
-        if NoticeParser.get_event_types(raw) == ("notice", "notify", "group_name"):
-            group_name = NoticeParser.get_event_field(raw, "name_new", "")
-        await self.remember_group_name(bot_name, group_id, group_name)
+        post_type, notice_type, sub_type = NoticeParser.get_event_types(raw)
+        renamed = (post_type, notice_type, sub_type) == (
+            "notice",
+            "notify",
+            "group_name",
+        )
         if key not in self.group_metadata:
-            self.group_metadata[key] = await self.db.get_group_metadata(*key)
+            async with self._group_metadata_locks[key]:
+                if key not in self.group_metadata:
+                    self.group_metadata[key] = await self.db.get_group_metadata(*key)
+        onebot = getattr(event, "get_platform_name", lambda: "")() == "aiocqhttp"
+        if renamed:
+            group_name = NoticeParser.get_event_field(raw, "name_new", "")
+        if renamed or not onebot or not self.group_metadata[key].get("group_name"):
+            await self.remember_group_name(bot_name, group_id, group_name)
         record = self.group_metadata[key]
-        age = datetime.now().timestamp() - record.get("refreshed_at", 0)
-        if record.get("group_name") and 0 <= age < GROUP_NAME_REFRESH_INTERVAL:
-            return
+        if onebot:
+            if post_type == "notice" and notice_type in GROUP_MEMBER_NOTICE_TYPES:
+                self._group_metadata_pending.add(key)
+            if (
+                record.get("onebot_snapshot")
+                and key not in self._group_metadata_pending
+            ):
+                return
+        else:
+            age = datetime.now().timestamp() - record.get("refreshed_at", 0)
+            if record.get("group_name") and 0 <= age < GROUP_NAME_REFRESH_INTERVAL:
+                return
         client = getattr(event, "bot", None)
         if (
             not callable(getattr(client, "call_action", None))
@@ -191,8 +214,9 @@ class DataCache:
         ):
             return
 
+        self._group_metadata_pending.discard(key)
         task = asyncio.create_task(
-            self._refresh_group_metadata(bot_name, event, record)
+            self._refresh_group_metadata(key, event, record, onebot)
         )
         self._group_metadata_tasks[key] = task
         running_tasks = getattr(self.plugin, "running_tasks", None)
@@ -208,50 +232,183 @@ class DataCache:
 
         task.add_done_callback(completed)
 
-    async def _refresh_group_metadata(
-        self, bot_name: str, event: AstrMessageEvent, snapshot: dict
-    ) -> None:
-        """Refresh one name without replacing an observation received during lookup.
+    async def get_group_prompt_data(
+        self, bot_name: str, event: AstrMessageEvent
+    ) -> str:
+        """Read group context without awaiting OneBot platform requests.
 
         Args:
-            bot_name: Owning bot configuration.
-            event: Incoming event supplying the lightweight group API client.
-            snapshot: Metadata object captured before the request started.
+            bot_name: Bot owning the cached group context.
+            event: Routing event for the current prompt.
+
+        Returns:
+            Group information for the prompt, or an empty string for a private chat.
         """
-        group_id = str(event.get_group_id())
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id in ("", "0", "None"):
+            return ""
+        if getattr(event, "get_platform_name", lambda: "")() != "aiocqhttp":
+            group = await event.get_group(group_id)
+            name = getattr(group, "group_name", None)
+            if isinstance(name, str):
+                await self.remember_group_name(bot_name, group_id, name, refreshed=True)
+            return str(group)
+
         key = (bot_name, group_id)
+        if not self.group_metadata.get(key, {}).get("onebot_snapshot"):
+            await self.observe_group_metadata(bot_name, event)
+        record = self.group_metadata[key]
+        members = record.get("onebot_snapshot") or {}
+        group = getattr(getattr(event, "message_obj", None), "group", None)
+        return (
+            f"Group ID: {group_id}\n"
+            f"Name: {record.get('group_name') or 'N/A'}\n"
+            f"Avatar: {getattr(group, 'group_avatar', None) or 'N/A'}\n"
+            f"Owner ID: {members.get('owner_id') or 'N/A'}\n"
+            f"Admin IDs: {members.get('admin_ids', 'N/A')}\n"
+            f"Member Count: {members.get('member_count', 'N/A')}\n"
+            f"Members Len: {members.get('member_list_length', 0)}\n"
+            f"First Member: {members.get('first_member') or 'N/A'}"
+        )
+
+    async def _refresh_group_metadata(
+        self,
+        key: tuple[str, str],
+        event: AstrMessageEvent,
+        snapshot: dict,
+        onebot: bool,
+    ) -> None:
+        """Refresh group data and process any member changes observed during lookup.
+
+        Args:
+            key: Owning bot and group identifiers.
+            event: Incoming event supplying the group API client.
+            snapshot: Metadata object captured before the request started.
+            onebot: Whether to refresh the OneBot membership summary as well.
+        """
+        group_id = key[1]
         self_id = str(event.get_self_id() or "")
+        params = {
+            "group_id": int(group_id) if group_id.isdigit() else group_id,
+            "no_cache": True,
+            **({"self_id": self_id} if self_id else {}),
+        }
         try:
-            info = await asyncio.wait_for(
-                event.bot.call_action(
-                    action="get_group_info",
-                    group_id=int(group_id) if group_id.isdigit() else group_id,
-                    no_cache=True,
-                    **({"self_id": self_id} if self_id else {}),
-                ),
-                timeout=GROUP_NAME_QUERY_TIMEOUT,
-            )
-            if isinstance(info, dict) and "data" in info:
-                if info.get("status") != "ok" or info.get("retcode") != 0:
-                    raise ValueError("Group lookup did not succeed")
-                info = info["data"]
-            if not isinstance(info, dict) or not isinstance(
-                info.get("group_name"), str
-            ):
-                raise ValueError("Group lookup omitted its name")
-            if not info["group_name"].strip():
-                raise ValueError("Group lookup returned an empty name")
-            if "group_id" in info and str(info["group_id"]) != group_id:
-                raise ValueError("Group lookup returned a different group")
-            if self.group_metadata.get(key) is snapshot:
-                await self.remember_group_name(
-                    bot_name, group_id, info["group_name"], refreshed=True
+            while True:
+                info = await asyncio.wait_for(
+                    event.bot.call_action(action="get_group_info", **params),
+                    timeout=GROUP_NAME_QUERY_TIMEOUT,
                 )
+                if isinstance(info, dict) and "data" in info:
+                    if info.get("status") != "ok" or info.get("retcode") != 0:
+                        raise ValueError("Group lookup did not succeed")
+                    info = info["data"]
+                name = info.get("group_name") if isinstance(info, dict) else None
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("Group lookup omitted its name")
+                if "group_id" in info and str(info["group_id"]) != group_id:
+                    raise ValueError("Group lookup returned a different group")
+
+                member_summary = None
+                member_error = None
+                if onebot:
+                    try:
+                        member_summary = await self._fetch_onebot_member_summary(
+                            event, params, info.get("member_count")
+                        )
+                    except Exception as error:
+                        member_error = error
+
+                async with self._group_metadata_locks[key]:
+                    record = self.group_metadata[key]
+                    if record is snapshot or member_summary is not None:
+                        if record is not snapshot and record.get("group_name"):
+                            name = record["group_name"]
+                        name = name.strip()
+                        now = datetime.now().timestamp()
+                        await self.db.upsert_group_metadata(
+                            *key, name, now, onebot_snapshot=member_summary
+                        )
+                        self.group_metadata[key] = {
+                            **record,
+                            "group_name": name,
+                            "refreshed_at": now,
+                        }
+                        if member_summary is not None:
+                            self.group_metadata[key]["onebot_snapshot"] = member_summary
+                if member_error is not None:
+                    raise member_error
+                self._group_metadata_retry_at.pop(key, None)
+                if not onebot or key not in self._group_metadata_pending:
+                    return
+                self._group_metadata_pending.discard(key)
+                snapshot = self.group_metadata[key]
         except Exception as error:
+            if onebot:
+                self._group_metadata_pending.add(key)
             self._group_metadata_retry_at[key] = (
                 time.monotonic() + GROUP_NAME_RETRY_INTERVAL
             )
-            logger.debug("[Giftia] Group name lookup failed for %s/%s: %s", *key, error)
+            logger.debug("[Giftia] Group lookup failed for %s/%s: %s", *key, error)
+
+    @staticmethod
+    async def _fetch_onebot_member_summary(
+        event: AstrMessageEvent, params: dict, member_count: int | str | None
+    ) -> dict:
+        """Reduce a OneBot roster to the fields rendered in prompts.
+
+        Args:
+            event: Incoming event supplying the OneBot API client.
+            params: Group and bot routing parameters.
+            member_count: Group size reported independently of the roster.
+
+        Returns:
+            Owner, administrators, counts and the first member display string.
+
+        Raises:
+            ValueError: The platform did not return a valid member list.
+        """
+        members = await asyncio.wait_for(
+            event.bot.call_action(action="get_group_member_list", **params),
+            timeout=GROUP_MEMBER_QUERY_TIMEOUT,
+        )
+        if isinstance(members, dict):
+            if members.get("status") != "ok" or members.get("retcode") != 0:
+                raise ValueError("Group member lookup did not succeed")
+            members = members.get("data")
+        if not isinstance(members, list):
+            raise ValueError("Group member lookup did not return a list")
+
+        owner_id = None
+        admin_ids = []
+        first_member = ""
+        valid_count = 0
+        for member in members:
+            if not isinstance(member, dict) or member.get("user_id") is None:
+                continue
+            uid = str(member["user_id"])
+            if not valid_count:
+                first_member = str(
+                    MessageMember(uid, member.get("nickname") or member.get("card"))
+                )
+            valid_count += 1
+            if member.get("role") == "owner":
+                owner_id = uid
+            elif member.get("role") == "admin":
+                admin_ids.append(uid)
+        if not valid_count:
+            raise ValueError("Group member lookup returned no valid members")
+        try:
+            count = int(member_count)
+        except (TypeError, ValueError):
+            count = valid_count
+        return {
+            "owner_id": owner_id,
+            "admin_ids": admin_ids,
+            "member_count": count if count > 0 else valid_count,
+            "member_list_length": valid_count,
+            "first_member": first_member,
+        }
 
     async def get_recent_message(
         self, bot_name: str, group_id: str, limit: int = 50
@@ -1097,11 +1254,14 @@ class DataCache:
                 group_or_user_id=group_or_user_id,
                 user_id=uid,
             )
-            relation, title = await self.get_user_relation(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                user_id=uid,
-            )
+            if record and "relation" in record:
+                relation, title = record["relation"], record.get("title") or ""
+            else:
+                relation, title = await self.get_user_relation(
+                    bot_name=bot_name,
+                    group_or_user_id=group_or_user_id,
+                    user_id=uid,
+                )
 
             brief = {
                 "user_id": uid,

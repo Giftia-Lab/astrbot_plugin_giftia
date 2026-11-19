@@ -9,6 +9,7 @@ from ..memory.atomic import memory_metadata
 from ..utils.relation_display import build_relation_display
 from ..utils.schemas import (
     ACCOUNT_TYPE_LABELS,
+    IMAGE_METADATA_PATTERN,
     MediaCaption,
     Memo,
     MessageData,
@@ -17,7 +18,6 @@ from ..utils.schemas import (
     XmlLlmResult,
     extract_media_ids,
 )
-from ..utils.video_utils import format_file_size
 
 # 构造消息的XML标签的属性，属性按顺序添加。MessageData对象的属性若不在这或者值为空，将不添加该属性
 MSG_PROPS = [
@@ -421,7 +421,6 @@ def build_reply_prompt(
     relation_score: dict[str, int | float] | None = None,
     user_profiles: list[dict] | None = None,
     current_session_id: str = "",
-    image_metadata: dict[str, MediaCaption] | None = None,
     cross_group_context: dict[str, list[MessageData]] | None = None,
     cross_group_names: dict[str, str] | None = None,
 ) -> str:
@@ -457,23 +456,6 @@ def build_reply_prompt(
         media_captions=media_captions,
         threshold=100,
     )
-    if image_metadata is None:
-        image_metadata = {media.hash_val: media for media in media_captions}
-    for hash_val, media in image_metadata.items():
-        if (media.media_type or "image").lower() != "image":
-            continue
-        parts = []
-        if media.width > 0 and media.height > 0:
-            parts.append(f"尺寸:{media.width}×{media.height}px")
-        if media.file_size > 0:
-            parts.append(f"大小:{format_file_size(media.file_size)}")
-        if parts:
-            placeholder = f"[图片:{hash_val}]"
-            for message in processed_messages:
-                message.content = message.content.replace(
-                    placeholder, f"{placeholder}[{'; '.join(parts)}]"
-                )
-
     profile_call_names = [
         {"user_id": profile["user_id"], "call_name": record.get("call_name")}
         for profile in user_profiles
@@ -757,7 +739,7 @@ def build_slang_block(
         return ""
     bodies = [
         (
-            original.content or "",
+            IMAGE_METADATA_PATTERN.sub(r"\1", original.content or ""),
             (rendered.content or "")[:truncate_limit]
             if truncate_limit > 0
             else (rendered.content or ""),

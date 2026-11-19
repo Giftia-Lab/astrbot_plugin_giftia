@@ -7,6 +7,11 @@ from astrbot.core.message.components import BaseMessageComponent
 
 FORWARD_MEDIA_PATTERN = re.compile(r"\[(?:图片|语音|视频):([^\]\s]+)\]")
 FORWARD_NESTED_PATTERN = re.compile(r"\[合并转发:([^\]\s]+)\]")
+_IMAGE_FILE_SIZE = r"\d+(?:\.\d+)?[KMG]?B"
+IMAGE_METADATA_PATTERN = re.compile(
+    r"(\[图片:[^\]\s]+\])"
+    rf"\[(?:尺寸:\d+×\d+px(?:, 大小:{_IMAGE_FILE_SIZE})?|大小:{_IMAGE_FILE_SIZE})\]"
+)
 ACCOUNT_TYPE_LABELS = {
     "unknown": "未知",
     "official_bot": "QQ 官方机器人",
