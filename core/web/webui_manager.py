@@ -202,6 +202,12 @@ class WebUIManager:
             desc="Update bot mood/state",
         )
         ctx.register_web_api(
+            route="/astrbot_plugin_giftia/status/delete",
+            view_handler=self.web_api.delete_bot_status,
+            methods=["POST"],
+            desc="Delete a conversation status record",
+        )
+        ctx.register_web_api(
             route="/astrbot_plugin_giftia/memos",
             view_handler=self.web_api.get_memos,
             methods=["GET"],

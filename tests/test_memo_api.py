@@ -9,11 +9,12 @@ import httpx
 import pytest
 import pytest_asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from core.database.data_cache import DataCache
 from core.database.database import Database
 from core.database.schema import initialize_database
 from core.utils.memos import MemoManager
 from core.utils.scheduler import Scheduler
-from core.utils.schemas import Memo
+from core.utils.schemas import Memo, Status
 from core.web.webui_manager import WebUIManager
 from fastapi import FastAPI, Request
 
@@ -192,6 +193,44 @@ async def test_memo_feature_switch_uses_owning_bot(task_runtime):
         ).status_code == code
         res = (await client.get("/memos", params=scope)).json()["data"]
         assert res["enabled"] is (bot == "Giftia")
+
+
+@pytest.mark.asyncio
+async def test_status_card_deletes_orphan_and_preserves_replacement_on_retry(
+    task_runtime,
+):
+    plugin, client = task_runtime
+    plugin.bot_map = {"Giftia": {"name": "Giftia"}}
+    plugin.get_bot_config = MagicMock(
+        return_value={"enabled_interactive_features": ["memo"]}
+    )
+    plugin.data_cache = cache = DataCache(db=plugin.db, http_manager=None, ltm=None)
+    await cache.set_bot_status("Removed", "g1", Status(mood="旧状态"))
+    await cache.set_bot_status("Giftia", "g1", Status(mood="其他机器人"))
+    await cache.set_bot_status("Removed", "g2", Status(mood="其他会话"))
+
+    cards = (await client.get("/status")).json()["data"]
+    [card] = [
+        r for r in cards if (r["bot_name"], r["group_or_user_id"]) == ("Removed", "g1")
+    ]
+    assert card["memos"] == {"enabled": False, "limit": 0, "items": []}
+    assert next(r for r in cards if r["bot_name"] == "Giftia")["memos"]["enabled"]
+    assert all(
+        call.args == ("Giftia",) for call in plugin.get_bot_config.call_args_list
+    )
+
+    body = {"status_id": card["id"], "bot_name": "Removed", "group_or_user_id": "g1"}
+    assert (await client.post("/status/delete", json=body)).status_code == 200
+    assert "Removed:g1" not in cache.bot_status
+    cards = (await client.get("/status")).json()["data"]
+    assert {(r["bot_name"], r["group_or_user_id"]) for r in cards} == {
+        ("Giftia", "g1"),
+        ("Removed", "g2"),
+    }
+
+    await cache.set_bot_status("Removed", "g1", Status(mood="新状态"))
+    assert (await client.post("/status/delete", json=body)).status_code == 200
+    assert (await plugin.db.get_bot_status("g1", "Removed")).mood == "新状态"
 
 
 @pytest.mark.asyncio

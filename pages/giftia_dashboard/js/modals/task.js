@@ -111,6 +111,27 @@ window.submitEditStatus = async function() {
     }
 };
 
+window.deleteBotStatus = function(statusId, bot, group, sessionLabel) {
+    bot = decodeURIComponent(bot);
+    group = decodeURIComponent(group);
+    sessionLabel = decodeURIComponent(sessionLabel);
+
+    window.showConfirm("删除会话状态", `确定删除「${bot} · ${sessionLabel}」的状态记录吗？`, async () => {
+        try {
+            const res = await window.apiPost("/status/delete", {
+                status_id: statusId,
+                bot_name: bot,
+                group_or_user_id: group
+            });
+            if (res.status !== "success") throw new Error(res.message || "删除会话状态失败");
+            window.showToast("会话状态已删除");
+            await window.GiftiaApp.loadBotStatus();
+        } catch (e) {
+            window.showToast(e.message);
+        }
+    });
+};
+
 // Session memos and scheduled tasks share a conversation picker.
 let memoData = null;
 let memoRequest = 0;

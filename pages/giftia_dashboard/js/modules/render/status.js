@@ -45,6 +45,7 @@ export function renderBotStatus(items) {
         const action = item.action || "无";
         const botArg = encodeStatusArg(item.bot_name);
         const groupArg = encodeStatusArg(item.group_or_user_id);
+        const sessionLabel = window.formatSessionLabel(item);
         const memos = item.memos || {};
         const taskBoardHtml = `
                 <button class="status-task-board" onclick="window.openTaskBoardModal('${botArg}', '${groupArg}', '${memos.enabled ? "memo" : "scheduled"}')">
@@ -73,7 +74,7 @@ export function renderBotStatus(items) {
                 <div class="status-card-header">
                     <div class="status-card-titles">
                         <div class="status-card-subtitle-row">
-                            <h3 class="status-card-title" title="${window.escapeHtml(window.formatSessionLabel(item))}">${window.escapeHtml(window.formatSessionLabel(item))}</h3>
+                            <h3 class="status-card-title" title="${window.escapeHtml(sessionLabel)}">${window.escapeHtml(sessionLabel)}</h3>
                             <button class="btn-copy-icon" onclick="window.copyToClipboard(decodeURIComponent('${groupArg}'), '会话 ID')" title="复制会话 ID">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                             </button>
@@ -117,6 +118,7 @@ export function renderBotStatus(items) {
                 ${taskBoardHtml}
 
                 <div class="status-actions">
+                    <button type="button" class="btn btn-danger btn-small" onclick="window.deleteBotStatus(${Number(item.id)}, '${botArg}', '${groupArg}', '${encodeStatusArg(sessionLabel)}')">删除</button>
                     <button class="btn btn-secondary btn-small" onclick="window.openEditStatusModal('${botArg}', '${groupArg}', '${encodeStatusArg(mood)}', '${encodeStatusArg(state)}', '${encodeStatusArg(memory)}', '${encodeStatusArg(action)}', '${encodeStatusArg(JSON.stringify(customStatus))}')">调整状态</button>
                     <button class="btn btn-primary btn-small" onclick="window.fillEnergy('${botArg}', '${groupArg}')">补满能量</button>
                 </div>
