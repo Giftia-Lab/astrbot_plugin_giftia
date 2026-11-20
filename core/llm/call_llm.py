@@ -277,7 +277,7 @@ class CallLLM:
                 error,
             )
         extra_info["elapsed_seconds"] = round(time.monotonic() - started, 3)
-        logger.info(
+        logger.debug(
             "[Giftia] Session completion for %s:%s: completed=%s, elapsed=%.3fs",
             bot_name,
             group_or_user_id,

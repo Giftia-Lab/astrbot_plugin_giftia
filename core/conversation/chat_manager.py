@@ -804,7 +804,7 @@ class ChatManager:
                         )
                         if completed and task_snapshot == snapshot:
                             approved_snapshot = snapshot
-                            logger.info(
+                            logger.debug(
                                 "[Giftia] Shortened session wait for %s:%s: "
                                 "messages=%d, saved_wait=%.3fs",
                                 bot_name,
