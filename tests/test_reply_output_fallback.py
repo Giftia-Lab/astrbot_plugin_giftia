@@ -13,6 +13,7 @@ from core.web.bot_api import BotApi
 
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
+from astrbot.core.provider.entities import LLMResponse
 
 
 @pytest.fixture
@@ -92,6 +93,37 @@ async def test_invalid_output_immediately_uses_separate_fallback(
         "success",
     ]
     assert [c.kwargs["extra_info"]["output_fallback"] for c in usage] == [False, True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected", ["primary", "backup-a"])
+async def test_each_native_reply_attempt_uses_the_effective_provider_suffix(
+    runtime, selected
+):
+    rt = runtime
+    suffix = "Clarify the conversation context."
+    await rt.caller.provider_health.update_prompt_suffix(
+        SimpleNamespace(upsert_kv_data=AsyncMock()),
+        text=suffix,
+        provider_ids={selected},
+    )
+    rt.context.tool_loop_agent.side_effect = [
+        RuntimeError("network failure"),
+        LLMResponse("assistant", completion_text="<unknown/>"),
+        LLMResponse("assistant", completion_text="<message>recovered</message>"),
+    ]
+    original = "Original prompt\n\n<tool_results>previous result</tool_results>"
+    result = await rt.caller.call_llm_reply(
+        rt.event, "group", ["primary"], "persona", original, use_source_tools=True
+    )
+    assert result.msg_texts == ["recovered"]
+    calls = rt.context.tool_loop_agent.await_args_list
+    providers = ["primary", "primary", "backup-a"]
+    assert [call.kwargs["chat_provider_id"] for call in calls] == providers
+    assert [call.kwargs["prompt"] for call in calls] == [
+        f"{original}\n\n{suffix}" if provider == selected else original
+        for provider in providers
+    ]
 
 
 @pytest.mark.asyncio

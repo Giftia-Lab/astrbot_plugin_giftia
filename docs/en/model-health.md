@@ -4,11 +4,17 @@ Open **模型状态 (Model status)** in Giftia WebUI to see configured providers
 
 ![Model health and connectivity tests](../images/model-health.jpg)
 
-Each provider/model has one displayed name. Usage stays on one line until **展开 (Expand)** is selected; use **收起 (Collapse)** to close it. Expanded usage stays open during automatic refreshes. Phones and other narrow screens use cards with wrapping names, health, request times, test and disable buttons.
+Each provider shows its name and `provider_id` so you can distinguish different configurations. Select **展开 (Expand)** to see all uses and **收起 (Collapse)** to return to one line. Expanded usage stays open during automatic refreshes. Phones and other narrow screens use cards with wrapping names, health, request times, test and disable buttons.
 
 ![Mobile model status with expanded usage](../images/model-health-mobile.png)
 
 Decisions, session completion checks, formal replies, invalid-output fallback, reply review, subagents, image/audio/video captions, sticker analysis, media inspection, memory and affinity summaries, and forwarded-message summaries share one in-memory health tracker keyed by AstrBot `provider_id`. Different configurations with the same model name have independent health. Provider configuration and ordering are preserved. Embeddings, reranking and TTS are outside this conversation-model view.
+
+## Context clarification prompt
+
+Enter a shared prompt in **防误判提示词 (Context clarification prompt)**, select **注入提示词 (Inject prompt)** under each desired provider, and click **保存提示词设置 (Save prompt settings)**. The field defaults to empty. The plugin database stores the selection by `provider_id`. Changes apply immediately after saving and work independently of the model health switch.
+
+Giftia appends the text once to the original user prompt for each business request to a selected provider. Decision providers use the end of the textual `state`. Retries and fallbacks use the actual provider's selection. Native tool loops reuse the suffix in the initial user message. Connectivity tests use their own random challenge.
 
 ## Management switch and manual disabling
 

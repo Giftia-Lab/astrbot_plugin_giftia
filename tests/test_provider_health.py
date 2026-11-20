@@ -101,6 +101,39 @@ async def test_success_resets_failures_even_when_reply_format_is_invalid(runtime
 
 
 @pytest.mark.asyncio
+async def test_prompt_suffix_applies_to_textual_decision_state(runtime):
+    store = SimpleNamespace(upsert_kv_data=AsyncMock())
+    await runtime.health.update_prompt_suffix(
+        store, text="Clarify the conversation context.", provider_ids={"model"}
+    )
+    decision = AsyncMock(return_value=True)
+    await runtime.health.call(
+        decision,
+        chat_provider_id="model",
+        decision=True,
+        question="Complete?",
+        state="A chat message",
+    )
+    decision.assert_awaited_once_with(
+        provider_id="model",
+        question="Complete?",
+        state="A chat message\n\nClarify the conversation context.",
+    )
+
+    await runtime.health.update_prompt_suffix(
+        store, text=" \n ", provider_ids={"model"}
+    )
+    await runtime.health.call(
+        decision,
+        chat_provider_id="model",
+        decision=True,
+        question="Complete?",
+        state="A chat message",
+    )
+    assert decision.await_args.kwargs["state"] == "A chat message"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error,reason,minimum",
     [

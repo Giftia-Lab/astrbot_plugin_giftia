@@ -2,10 +2,14 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 
 const fields = new Map();
+const listeners = new Map();
 globalThis.document = {
-    addEventListener() {},
+    addEventListener(type, listener) {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(listener);
+    },
     getElementById(id) {
-        if (!fields.has(id)) fields.set(id, {innerHTML: '', textContent: '', disabled: false, querySelectorAll: () => []});
+        if (!fields.has(id)) fields.set(id, {id, value: '', innerHTML: '', textContent: '', disabled: false, querySelectorAll: () => []});
         return fields.get(id);
     }
 };
@@ -209,4 +213,49 @@ test('management can be configured before any models have been selected', async 
     window.apiGet = async () => ({status: 'success', data: {enabled: true, models: []}});
     await saveModelHealthSettings({enabled: true});
     assert.equal(get('model-health-enabled').checked, true);
+});
+
+test('prompt suffix saves the draft and exact provider IDs after health refreshes', async () => {
+    const providerId = "provider'<>id";
+    const snapshot = {
+        enabled: false,
+        models: [model('unmanaged'), {...model('unmanaged'), provider_id: 'other'}],
+        prompt_suffix: {text: 'Saved text', provider_ids: ['other']}
+    };
+    window.apiGet = async () => ({status: 'success', data: snapshot});
+    await loadModelHealth();
+    const input = get('model-prompt-suffix');
+    assert.equal(input.value, 'Saved text');
+    assert.equal(input.disabled, false);
+    assert.match(get('model-health-list').innerHTML, /data-prompt-suffix-provider="other"[^>]*\bchecked\b/);
+
+    input.value = 'Edited text\nSecond line';
+    for (const listener of listeners.get('input')) listener({target: input});
+    for (const listener of listeners.get('change')) {
+        listener({target: {checked: true, dataset: {promptSuffixProvider: providerId}}});
+        listener({target: {checked: false, dataset: {promptSuffixProvider: 'other'}}});
+    }
+    await loadModelHealth();
+    assert.equal(input.value, 'Edited text\nSecond line');
+    assert.match(get('model-health-list').innerHTML, /data-prompt-suffix-provider="provider&#039;&lt;&gt;id"[^>]*\bchecked\b/);
+    assert.doesNotMatch(get('model-health-list').innerHTML, /data-prompt-suffix-provider="other"[^>]*\bchecked\b/);
+
+    let saved = false;
+    window.apiPost = async (endpoint, body) => {
+        assert.equal(endpoint, '/models/prompt-suffix');
+        assert.deepEqual(body, {text: 'Edited text\nSecond line', provider_ids: [providerId]});
+        if (!saved) return {status: 'error', message: '保存失败'};
+        snapshot.prompt_suffix = body;
+        return {status: 'success', data: snapshot};
+    };
+    const submit = () => Promise.all(listeners.get('submit').map(listener => listener({
+        target: get('model-prompt-suffix-form'), preventDefault() {}
+    })));
+    await submit();
+    assert.equal(input.value, 'Edited text\nSecond line');
+    assert.equal(snapshot.prompt_suffix.text, 'Saved text');
+    saved = true;
+    await submit();
+    assert.deepEqual(snapshot.prompt_suffix.provider_ids, [providerId]);
+    assert.equal(get('model-prompt-suffix-save').disabled, false);
 });

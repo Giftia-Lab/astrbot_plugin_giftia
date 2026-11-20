@@ -29,6 +29,7 @@ class WebUIManager:
             ("/models/health", self.web_api.get_model_health, "GET"),
             ("/models/test", self.web_api.test_model_connection, "POST"),
             ("/models/settings", self.web_api.update_model_health_settings, "POST"),
+            ("/models/prompt-suffix", self.web_api.update_model_prompt_suffix, "POST"),
         ):
             ctx.register_web_api(
                 route=f"/astrbot_plugin_giftia{route}",

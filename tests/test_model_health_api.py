@@ -92,6 +92,7 @@ def runtime():
                 "health": api.get_model_health,
                 "test": api.test_model_connection,
                 "settings": api.update_model_health_settings,
+                "prompt-suffix": api.update_model_prompt_suffix,
             }
             return await handlers[action]()
 
@@ -107,6 +108,10 @@ async def test_inventory_deduplicates_ids_covers_all_roles_and_omits_credentials
     ) as client:
         response = await client.get("/models/health")
     assert response.json()["data"]["enabled"] is True
+    assert response.json()["data"]["prompt_suffix"] == {
+        "text": "",
+        "provider_ids": [],
+    }
     rows = {row["provider_id"]: row for row in response.json()["data"]["models"]}
     assert set(rows) == {
         "shared",
@@ -140,6 +145,11 @@ async def test_inventory_deduplicates_ids_covers_all_roles_and_omits_credentials
 async def test_successful_connectivity_test_bypasses_cooldown_and_restores_shared_state(
     runtime,
 ):
+    await runtime.health.update_prompt_suffix(
+        runtime.plugin.db,
+        text="Explain the conversation context.",
+        provider_ids={"shared"},
+    )
     for _ in range(2):
         with pytest.raises(ServiceError):
             await runtime.health.call(
@@ -161,6 +171,10 @@ async def test_successful_connectivity_test_bypasses_cooldown_and_restores_share
         == "healthy"
     )
     runtime.plugin.context.llm_generate.assert_awaited_once()
+    assert (
+        "Explain the conversation context."
+        not in (runtime.plugin.context.llm_generate.await_args.kwargs["prompt"])
+    )
     usage = runtime.plugin.db.log_token_usage.await_args.kwargs
     assert usage["type"] == "provider_test"
     assert usage["extra_info"]["status"] == "success"
@@ -386,6 +400,18 @@ async def test_controls_persist_across_database_reopen_and_block_all_tests(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(runtime.app), base_url="http://test"
         ) as client:
+            suffix_text = "补充群聊语境。\n沿用当前输出格式。"
+            suffix_settings = await client.post(
+                "/models/prompt-suffix",
+                json={
+                    "text": f" {suffix_text}\n",
+                    "provider_ids": ["shared", "reply", "reply"],
+                },
+            )
+            assert suffix_settings.json()["data"]["prompt_suffix"] == {
+                "text": suffix_text,
+                "provider_ids": ["reply", "shared"],
+            }
             disabled = await client.post(
                 "/models/settings", json={"provider_id": "shared", "enabled": False}
             )
@@ -416,11 +442,18 @@ async def test_controls_persist_across_database_reopen_and_block_all_tests(
         await restarted.load_settings(Database(conn))
         assert restarted.enabled is False
         assert restarted.disabled_provider_ids == {"shared"}
+        assert restarted.prompt_suffix_provider_ids == {"reply", "shared"}
         blocked = AsyncMock()
         with pytest.raises(ProviderUnavailableError):
             await restarted.call(blocked, chat_provider_id="shared")
         blocked.assert_not_awaited()
-        await restarted.call(AsyncMock(return_value="reply"), chat_provider_id="reply")
+        business = AsyncMock(return_value="reply")
+        await restarted.call(business, chat_provider_id="reply", prompt="User input")
+        business.assert_awaited_once_with(
+            chat_provider_id="reply",
+            prompt=f"User input\n\n{suffix_text}",
+            request_max_retries=1,
+        )
     finally:
         await conn.close()
 
@@ -447,6 +480,25 @@ async def test_invalid_control_updates_are_rejected(runtime, payload):
     runtime.plugin.db.upsert_kv_data.assert_not_awaited()
     assert runtime.health.enabled is True
     assert runtime.health.disabled_provider_ids == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": None, "provider_ids": ["shared"]},
+        {"text": "context", "provider_ids": [["shared"]]},
+        {"text": "context", "provider_ids": ["unused"]},
+    ],
+)
+async def test_invalid_prompt_suffix_settings_are_rejected(runtime, payload):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
+        response = await client.post("/models/prompt-suffix", json=payload)
+    assert response.status_code == 400
+    runtime.plugin.db.upsert_kv_data.assert_not_awaited()
+    assert runtime.health.prompt_suffix == ""
 
 
 @pytest.mark.asyncio

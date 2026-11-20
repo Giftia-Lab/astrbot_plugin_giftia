@@ -577,7 +577,7 @@
             <section id="tab-model-health" class="tab-panel">
                 <div class="filter-card card model-health-toolbar">
                     <div>
-                        <h3>模型状态 <span class="info-tooltip" data-tooltip="所有流程共用供应商健康状态。开启健康管理后自动跳过故障模型，并在冷却后探测；探测回复必须精确匹配随机校验串才会恢复。手动停用的模型始终直接跳过，且不进行自动或手动探测。设置会自动保存。"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></h3>
+                        <h3>模型状态 <span class="info-tooltip" data-tooltip="所有流程共用供应商健康状态。开启健康管理后自动跳过故障模型，并在冷却后探测；探测回复必须精确匹配随机校验串才会恢复。手动停用的模型始终直接跳过，且不进行自动或手动探测。健康管理和模型启停设置会自动保存。"><svg viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span></h3>
                         <span id="model-health-hint" class="muted-text">查看各流程使用的对话模型，测试连接并管理可用状态。</span>
                     </div>
                     <div class="model-health-controls">
@@ -589,6 +589,14 @@
                         <button id="model-health-refresh" class="btn btn-secondary" type="button">刷新</button>
                     </div>
                 </div>
+                <form id="model-prompt-suffix-form" class="filter-card card model-prompt-suffix-form">
+                    <div class="form-group">
+                        <label for="model-prompt-suffix">防误判提示词</label>
+                        <textarea id="model-prompt-suffix" rows="3" aria-describedby="model-prompt-suffix-hint" disabled></textarea>
+                        <small id="model-prompt-suffix-hint" class="muted-text">勾选下方模型并保存，在其业务请求的用户提示词末尾追加一次。留空停用。</small>
+                    </div>
+                    <button id="model-prompt-suffix-save" class="btn btn-primary" type="submit" disabled>保存提示词设置</button>
+                </form>
                 <p id="model-health-count" class="muted-text">正在加载模型状态…</p>
                 <p id="model-health-error" role="alert"></p>
                 <div class="card table-container model-health-table-container">

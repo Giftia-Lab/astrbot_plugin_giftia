@@ -13,6 +13,8 @@ const reasonLabels = {
 };
 let models = [];
 let managementEnabled = true;
+let promptSuffixProviderIds = new Set();
+let promptSuffixDirty = false;
 let savingSettings = false;
 let loadVersion = 0;
 let refreshTimer = null;
@@ -21,6 +23,22 @@ const expandedUses = new Set();
 let usageObserver;
 const escape = value => window.escapeHtml(String(value ?? ''));
 const formatTime = value => value ? new Date(value * 1000).toLocaleString('zh-CN', {hour12: false}) : '—';
+
+function applyModelSnapshot(result, errorMessage, savedPromptSuffix = false) {
+    if (result?.status !== 'success' || !Array.isArray(result.data?.models) || typeof result.data.enabled !== 'boolean') {
+        throw new Error(result?.message || errorMessage);
+    }
+    models = result.data.models;
+    managementEnabled = result.data.enabled;
+    if (!promptSuffixDirty || savedPromptSuffix) {
+        const settings = result.data.prompt_suffix;
+        const input = document.getElementById('model-prompt-suffix');
+        const text = settings?.text ?? '';
+        if (input && input.value !== text) input.value = text;
+        promptSuffixProviderIds = new Set(settings?.provider_ids ?? []);
+        promptSuffixDirty = false;
+    }
+}
 
 function updateUsageOverflow() {
     const container = document.getElementById('model-health-list');
@@ -48,6 +66,10 @@ function renderModels() {
         toggle.checked = managementEnabled;
         toggle.disabled = savingSettings;
     }
+    const promptInput = document.getElementById('model-prompt-suffix');
+    const promptSave = document.getElementById('model-prompt-suffix-save');
+    if (promptInput) promptInput.disabled = savingSettings;
+    if (promptSave) promptSave.disabled = savingSettings;
     const hint = document.getElementById('model-health-hint');
     if (hint) hint.textContent = managementEnabled
         ? '自动跳过故障模型，并在冷却后探测恢复。'
@@ -58,6 +80,8 @@ function renderModels() {
         return;
     }
     container.innerHTML = models.map((model, index) => {
+        const providerId = escape(model.provider_id);
+        const name = model.name || model.provider_id;
         const busy = testing.has(model.provider_id) || model.status === 'probing';
         const disabled = model.enabled === false;
         const status = disabled ? 'disabled' : !model.registered ? 'missing'
@@ -70,17 +94,24 @@ function renderModels() {
             : status === 'unmanaged' ? '按原有顺序调用，不自动探测'
             : (reasonLabels[model.reason] || '');
         return `<tr>
-            <td class="model-health-name" data-label="供应商 / 模型"><strong>${escape(model.name || model.provider_id)}</strong></td>
+            <td class="model-health-name" data-label="供应商 / 模型">
+                <strong>${escape(name)}</strong>
+                ${name !== model.provider_id ? `<div class="model-health-provider-id muted-text">${providerId}</div>` : ''}
+                <label class="model-prompt-suffix-option">
+                    <input type="checkbox" data-prompt-suffix-provider="${providerId}" aria-label="为 ${providerId} 注入防误判提示词" ${promptSuffixProviderIds.has(model.provider_id) ? 'checked' : ''} ${savingSettings ? 'disabled' : ''}>
+                    注入提示词
+                </label>
+            </td>
             <td class="model-health-usage-cell" data-label="使用位置"><div class="model-health-usage">
                 <div class="model-health-uses" id="model-health-uses-${index}">${model.uses.map(use => `<span class="badge badge-secondary">${escape(use)}</span>`).join('')}</div>
-                <button class="model-health-uses-toggle" type="button" data-model-uses="${escape(model.provider_id)}" aria-controls="model-health-uses-${index}" aria-expanded="false" hidden>展开</button>
+                <button class="model-health-uses-toggle" type="button" data-model-uses="${providerId}" aria-controls="model-health-uses-${index}" aria-expanded="false" hidden>展开</button>
             </div></td>
             <td class="model-health-status" data-label="健康状态"><span class="badge badge-${color}">${escape(statusLabels[status] || status)}</span>${detail ? `<div class="muted-text model-health-detail">${escape(detail)}</div>` : ''}${model.reason && detail !== reasonLabels[model.reason] ? `<div class="muted-text">${escape(reasonLabels[model.reason] || '')}</div>` : ''}${model.failures ? `<div class="muted-text">连续失败 ${model.failures} 次</div>` : ''}</td>
             <td class="model-health-attempt" data-label="最近请求 / 耗时">${escape(formatTime(model.last_attempt))}<div class="muted-text">${model.last_latency_ms == null ? '—' : `${escape(model.last_latency_ms)} ms`}</div></td>
             <td class="model-health-success" data-label="最近成功">${escape(formatTime(model.last_success))}</td>
             <td class="model-health-action" data-label="操作"><div class="model-health-actions">
-                <button class="btn btn-small btn-secondary" data-test-model="${escape(model.provider_id)}" ${busy || disabled || !managementEnabled || !model.registered || savingSettings ? 'disabled' : ''}>${busy ? '测试中…' : '测试'}</button>
-                <button class="btn btn-small ${disabled ? 'btn-secondary' : 'btn-danger'}" data-toggle-model="${escape(model.provider_id)}" ${savingSettings ? 'disabled' : ''}>${disabled ? '启用' : '停用'}</button>
+                <button class="btn btn-small btn-secondary" data-test-model="${providerId}" ${busy || disabled || !managementEnabled || !model.registered || savingSettings ? 'disabled' : ''}>${busy ? '测试中…' : '测试'}</button>
+                <button class="btn btn-small ${disabled ? 'btn-secondary' : 'btn-danger'}" data-toggle-model="${providerId}" ${savingSettings ? 'disabled' : ''}>${disabled ? '启用' : '停用'}</button>
             </div></td>
         </tr>`;
     }).join('');
@@ -100,11 +131,7 @@ export async function loadModelHealth() {
     try {
         const result = await window.apiGet('/models/health');
         if (version !== loadVersion) return;
-        if (result?.status !== 'success' || !Array.isArray(result.data?.models) || typeof result.data.enabled !== 'boolean') {
-            throw new Error(result?.message || '模型状态加载失败');
-        }
-        models = result.data.models;
-        managementEnabled = result.data.enabled;
+        applyModelSnapshot(result, '模型状态加载失败');
         if (error) error.textContent = '';
         renderModels();
     } catch (err) {
@@ -137,21 +164,19 @@ export async function testModelConnection(providerId) {
     }
 }
 
-export async function saveModelHealthSettings(settings) {
+export async function saveModelHealthSettings(settings, {promptSuffix = false} = {}) {
     if (savingSettings) return;
     savingSettings = true;
     ++loadVersion;
     renderModels();
+    const errorMessage = promptSuffix ? '保存防误判提示词失败' : '保存模型状态设置失败';
     try {
-        const result = await window.apiPost('/models/settings', settings);
-        if (result?.status !== 'success' || !Array.isArray(result.data?.models) || typeof result.data.enabled !== 'boolean') {
-            throw new Error(result?.message || '保存模型状态设置失败');
-        }
-        models = result.data.models;
-        managementEnabled = result.data.enabled;
-        window.showToast('模型状态设置已保存', 'success');
+        const endpoint = promptSuffix ? '/models/prompt-suffix' : '/models/settings';
+        const result = await window.apiPost(endpoint, settings);
+        applyModelSnapshot(result, errorMessage, promptSuffix);
+        window.showToast(promptSuffix ? '提示词设置已保存' : '模型状态设置已保存', 'success');
     } catch (err) {
-        window.showToast(err.message || '保存模型状态设置失败', 'error');
+        window.showToast(err.message || errorMessage, 'error');
     } finally {
         savingSettings = false;
         renderModels();
@@ -163,6 +188,25 @@ document.addEventListener('change', event => {
     if (event.target.id === 'model-health-enabled') {
         saveModelHealthSettings({enabled: event.target.checked});
     }
+    const providerId = event.target.dataset?.promptSuffixProvider;
+    if (providerId) {
+        if (event.target.checked) promptSuffixProviderIds.add(providerId);
+        else promptSuffixProviderIds.delete(providerId);
+        promptSuffixDirty = true;
+    }
+});
+
+document.addEventListener('input', event => {
+    if (event.target.id === 'model-prompt-suffix') promptSuffixDirty = true;
+});
+
+document.addEventListener('submit', event => {
+    if (event.target.id !== 'model-prompt-suffix-form') return;
+    event.preventDefault();
+    return saveModelHealthSettings({
+        text: document.getElementById('model-prompt-suffix').value,
+        provider_ids: models.map(model => model.provider_id).filter(id => promptSuffixProviderIds.has(id)),
+    }, {promptSuffix: true});
 });
 
 document.addEventListener('click', event => {

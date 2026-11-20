@@ -50,6 +50,49 @@
     opacity: 0.5;
 }
 
+.model-prompt-suffix-form {
+    display: grid;
+    gap: 12px;
+}
+
+.model-prompt-suffix-form .form-group label {
+    color: var(--font-color);
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.model-prompt-suffix-form textarea {
+    resize: vertical;
+}
+
+.model-prompt-suffix-form .btn {
+    justify-self: end;
+}
+
+.model-prompt-suffix-form .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.model-health-provider-id {
+    margin-top: 4px;
+    font-size: 12px;
+}
+
+.model-prompt-suffix-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 7px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.model-prompt-suffix-option input {
+    margin: 0;
+    accent-color: var(--primary);
+}
+
 .model-health-table {
     table-layout: fixed;
 }
