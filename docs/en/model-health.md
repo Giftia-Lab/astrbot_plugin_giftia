@@ -12,7 +12,7 @@ Decisions, session completion checks, formal replies, invalid-output fallback, r
 
 ## Context clarification prompt
 
-Enter a shared prompt in **防误判提示词 (Context clarification prompt)**, select **注入提示词 (Inject prompt)** under each desired provider, and click **保存提示词设置 (Save prompt settings)**. The field defaults to empty. The plugin database stores the selection by `provider_id`. Changes apply immediately after saving and work independently of the model health switch.
+Click **防误判提示词 (Context clarification prompt)** in the model status header to expand the editor. The editor starts collapsed and the prompt defaults to empty. Click **保存提示词 (Save prompt)** to save the shared text. Each provider's **注入提示词 (Inject prompt)** switch saves and applies immediately by `provider_id`. The database persists the text and switches independently of model health management.
 
 Giftia appends the text once to the original user prompt for each business request to a selected provider. Decision providers use the end of the textual `state`. Retries and fallbacks use the actual provider's selection. Native tool loops reuse the suffix in the initial user message. Connectivity tests use their own random challenge.
 
@@ -45,4 +45,4 @@ With management enabled and the provider not manually disabled, click **测试 (
 
 A strictly validated reply immediately clears failures and cooldown for every flow. Invalid output or an exception does not restore health and starts cooldown even for a previously available provider. This tests text generation, not multimodal capabilities or business XML formatting. Ordinary business output keeps its existing parsers and is not subject to the probe challenge rule.
 
-The visible page refreshes about every five seconds and has a manual refresh button. Automatic and manual tests are recorded under token usage type `provider_test`, with `manual_test` identifying the source. The page exposes classified failure reasons, not API keys or raw exceptions.
+The visible page refreshes automatically about every five seconds. Automatic and manual tests are recorded under token usage type `provider_test`, with `manual_test` identifying the source. The page exposes classified failure reasons, not API keys or raw exceptions.

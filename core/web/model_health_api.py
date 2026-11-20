@@ -150,23 +150,40 @@ class ModelHealthApi:
         return await self.get_model_health()
 
     async def update_model_prompt_suffix(self):
-        """Persist the shared prompt suffix and the providers selected to receive it."""
+        """Save the prompt text or update one provider's injection switch."""
         try:
             body = await request.json()
         except ValueError:
             return error_response("请求内容格式错误")
-        if not isinstance(body, dict) or not isinstance(body.get("text"), str):
-            return error_response("防误判提示词必须为文本")
-        provider_ids = body.get("provider_ids")
-        used_ids = {model["provider_id"] for model in self._used_models()}
-        if not isinstance(provider_ids, list) or any(
-            not isinstance(provider_id, str) or provider_id not in used_ids
-            for provider_id in provider_ids
-        ):
-            return error_response("请选择插件已配置的对话模型")
+        if not isinstance(body, dict):
+            return error_response("请求内容格式错误")
+        if "provider_id" in body:
+            provider_id = body["provider_id"]
+            enabled = body.get("enabled")
+            if not isinstance(enabled, bool):
+                return error_response("启用状态必须为布尔值")
+            if not isinstance(provider_id, str) or provider_id not in {
+                model["provider_id"] for model in self._used_models()
+            }:
+                return error_response("请选择插件已配置的对话模型")
+            updates = {"provider_id": provider_id, "enabled": enabled}
+        else:
+            text = body.get("text")
+            if not isinstance(text, str):
+                return error_response("防误判提示词必须为文本")
+            updates = {"text": text}
+            if "provider_ids" in body:
+                provider_ids = body["provider_ids"]
+                used_ids = {model["provider_id"] for model in self._used_models()}
+                if not isinstance(provider_ids, list) or any(
+                    not isinstance(provider_id, str) or provider_id not in used_ids
+                    for provider_id in provider_ids
+                ):
+                    return error_response("请选择插件已配置的对话模型")
+                updates["provider_ids"] = set(provider_ids)
         try:
             await get_provider_health(self.giftia).update_prompt_suffix(
-                self.giftia.db, text=body["text"], provider_ids=set(provider_ids)
+                self.giftia.db, **updates
             )
         except Exception:
             logger.error("Failed to save provider prompt suffix", exc_info=True)
@@ -204,7 +221,7 @@ class ModelHealthApi:
             message = "连通性测试通过，已恢复共享健康状态"
         except ProviderUnavailableError:
             return error_response(
-                "该模型已停用、健康管理已关闭或正在进行测试，请刷新后重试"
+                "该模型已停用、健康管理已关闭或正在进行测试，请稍后重试"
             )
         except InvalidProbeResponseError:
             message = "测试回复未通过严格格式校验，模型保持不可用"

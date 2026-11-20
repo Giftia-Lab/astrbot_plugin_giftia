@@ -125,14 +125,13 @@ test('a stale list response cannot overwrite a newer health snapshot', async () 
     assert.doesNotMatch(get('model-health-list').innerHTML, /冷却中/);
 });
 
-test('refresh errors preserve the last known rows and re-enable refresh', async () => {
+test('refresh errors preserve the last known rows and report the error', async () => {
     await loadModelHealth();
     const before = get('model-health-list').innerHTML;
     window.apiGet = async () => { throw new Error('offline'); };
     await loadModelHealth();
     assert.equal(get('model-health-list').innerHTML, before);
     assert.equal(get('model-health-error').textContent, 'offline');
-    assert.equal(get('model-health-refresh').disabled, false);
 });
 
 test('the global switch saves and disables testing while manual disables remain visible', async () => {
@@ -215,7 +214,7 @@ test('management can be configured before any models have been selected', async 
     assert.equal(get('model-health-enabled').checked, true);
 });
 
-test('prompt suffix saves the draft and exact provider IDs after health refreshes', async () => {
+test('provider switches save immediately while prompt text remains a separate draft', async () => {
     const providerId = "provider'<>id";
     const snapshot = {
         enabled: false,
@@ -231,31 +230,37 @@ test('prompt suffix saves the draft and exact provider IDs after health refreshe
 
     input.value = 'Edited text\nSecond line';
     for (const listener of listeners.get('input')) listener({target: input});
-    for (const listener of listeners.get('change')) {
-        listener({target: {checked: true, dataset: {promptSuffixProvider: providerId}}});
-        listener({target: {checked: false, dataset: {promptSuffixProvider: 'other'}}});
-    }
-    await loadModelHealth();
-    assert.equal(input.value, 'Edited text\nSecond line');
-    assert.match(get('model-health-list').innerHTML, /data-prompt-suffix-provider="provider&#039;&lt;&gt;id"[^>]*\bchecked\b/);
-    assert.doesNotMatch(get('model-health-list').innerHTML, /data-prompt-suffix-provider="other"[^>]*\bchecked\b/);
-
-    let saved = false;
+    const change = (id, checked) => Promise.all(listeners.get('change').map(listener => listener({
+        target: {checked, dataset: {promptSuffixProvider: id}}
+    })));
+    const postBodies = [];
+    const notifications = [];
+    window.showToast = (...args) => notifications.push(args);
     window.apiPost = async (endpoint, body) => {
         assert.equal(endpoint, '/models/prompt-suffix');
-        assert.deepEqual(body, {text: 'Edited text\nSecond line', provider_ids: [providerId]});
-        if (!saved) return {status: 'error', message: '保存失败'};
-        snapshot.prompt_suffix = body;
+        postBodies.push(body);
+        if (body.provider_id === 'other') return {status: 'error', message: '保存失败'};
+        snapshot.prompt_suffix = body.provider_id
+            ? {...snapshot.prompt_suffix, provider_ids: [...snapshot.prompt_suffix.provider_ids, body.provider_id]}
+            : {...snapshot.prompt_suffix, text: body.text};
         return {status: 'success', data: snapshot};
     };
-    const submit = () => Promise.all(listeners.get('submit').map(listener => listener({
+    await change(providerId, true);
+    await change('other', false);
+    assert.deepEqual(postBodies, [
+        {provider_id: providerId, enabled: true},
+        {provider_id: 'other', enabled: false}
+    ]);
+    assert.deepEqual(notifications, [['保存失败', 'error']]);
+    assert.deepEqual(snapshot.prompt_suffix, {text: 'Saved text', provider_ids: ['other', providerId]});
+    assert.equal(input.value, 'Edited text\nSecond line');
+    assert.match(get('model-health-list').innerHTML, /data-prompt-suffix-provider="provider&#039;&lt;&gt;id"[^>]*\bchecked\b/);
+    assert.match(get('model-health-list').innerHTML, /data-prompt-suffix-provider="other"[^>]*\bchecked\b/);
+
+    await Promise.all(listeners.get('submit').map(listener => listener({
         target: get('model-prompt-suffix-form'), preventDefault() {}
     })));
-    await submit();
-    assert.equal(input.value, 'Edited text\nSecond line');
-    assert.equal(snapshot.prompt_suffix.text, 'Saved text');
-    saved = true;
-    await submit();
-    assert.deepEqual(snapshot.prompt_suffix.provider_ids, [providerId]);
+    assert.deepEqual(postBodies.at(-1), {text: 'Edited text\nSecond line'});
+    assert.deepEqual(snapshot.prompt_suffix, {text: 'Edited text\nSecond line', provider_ids: ['other', providerId]});
     assert.equal(get('model-prompt-suffix-save').disabled, false);
 });

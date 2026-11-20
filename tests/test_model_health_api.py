@@ -489,6 +489,8 @@ async def test_invalid_control_updates_are_rejected(runtime, payload):
         {"text": None, "provider_ids": ["shared"]},
         {"text": "context", "provider_ids": [["shared"]]},
         {"text": "context", "provider_ids": ["unused"]},
+        {"provider_id": "shared", "enabled": "true"},
+        {"provider_id": "unused", "enabled": True},
     ],
 )
 async def test_invalid_prompt_suffix_settings_are_rejected(runtime, payload):
@@ -499,6 +501,38 @@ async def test_invalid_prompt_suffix_settings_are_rejected(runtime, payload):
     assert response.status_code == 400
     runtime.plugin.db.upsert_kv_data.assert_not_awaited()
     assert runtime.health.prompt_suffix == ""
+
+
+@pytest.mark.asyncio
+async def test_concurrent_prompt_saves_merge_text_and_individual_switches(runtime):
+    async def save(*args):
+        await asyncio.sleep(0.01)
+
+    runtime.plugin.db.upsert_kv_data.side_effect = save
+    await runtime.health.update_prompt_suffix(
+        runtime.plugin.db, text="Original text", provider_ids={"backup"}
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app), base_url="http://test"
+    ) as client:
+        results = await asyncio.gather(
+            client.post(
+                "/models/prompt-suffix", json={"provider_id": "reply", "enabled": True}
+            ),
+            client.post("/models/prompt-suffix", json={"text": "New text"}),
+            client.post(
+                "/models/prompt-suffix", json={"provider_id": "shared", "enabled": True}
+            ),
+            client.post(
+                "/models/prompt-suffix",
+                json={"provider_id": "backup", "enabled": False},
+            ),
+        )
+        state = (await client.get("/models/health")).json()["data"]
+    assert all(response.status_code == 200 for response in results)
+    expected = {"text": "New text", "provider_ids": ["reply", "shared"]}
+    assert state["prompt_suffix"] == expected
+    assert json.loads(runtime.plugin.db.upsert_kv_data.await_args.args[1]) == expected
 
 
 @pytest.mark.asyncio

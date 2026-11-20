@@ -113,24 +113,41 @@ class ProviderHealth:
         self.disabled_provider_ids = set(settings["disabled_provider_ids"])
 
     async def update_prompt_suffix(
-        self, database, *, text: str, provider_ids: set[str]
+        self,
+        database,
+        *,
+        text: str | None = None,
+        provider_ids: set[str] | None = None,
+        provider_id: str | None = None,
+        enabled: bool = False,
     ) -> None:
-        """Save the shared suffix and selected providers before applying them.
+        """Persist a prompt setting change and merge it with the current settings.
 
         Args:
             database: Plugin database containing the shared settings.
-            text: Suffix to append to the selected providers' user prompts.
-            provider_ids: Configured providers selected by the operator.
+            text: Replacement suffix, or None to preserve the saved text.
+            provider_ids: Complete selection from older callers, if supplied.
+            provider_id: Provider whose injection switch changed, if supplied.
+            enabled: Whether to inject the suffix for that provider.
         """
-        text = text.strip()
-        selected = sorted(provider_ids)
         async with self._settings_lock:
+            suffix = self.prompt_suffix if text is None else text.strip()
+            selected = (
+                self.prompt_suffix_provider_ids
+                if provider_ids is None
+                else provider_ids
+            ).copy()
+            if provider_id is not None:
+                if enabled:
+                    selected.add(provider_id)
+                else:
+                    selected.discard(provider_id)
             await database.upsert_kv_data(
                 "provider_prompt_suffix",
-                json.dumps({"text": text, "provider_ids": selected}),
+                json.dumps({"text": suffix, "provider_ids": sorted(selected)}),
             )
-            self.prompt_suffix = text
-            self.prompt_suffix_provider_ids = set(selected)
+            self.prompt_suffix = suffix
+            self.prompt_suffix_provider_ids = selected
 
     async def update_settings(
         self, database, *, enabled: bool, provider_id: str | None = None
