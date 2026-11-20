@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+from ..utils.reply_timing import measure_recall
 from .atomic import memory_metadata
 from .passive_tasks import PassiveSummaryTaskMixin
 from .recall_scope import resolve_memory_recall_scope
@@ -218,11 +219,12 @@ class PassiveMemoryManager(PassiveSummaryTaskMixin):
             else:
                 scope = f"({scope}) AND ({user_scope})"
         predicate = f"bot_name=? AND ({scope}) AND revision=indexed_revision"
-        async with self.plugin.db.query(
-            f"SELECT memory_id FROM memories WHERE {predicate}",
-            params,
-        ) as cursor:
-            eligible_ids = [row[0] for row in await cursor.fetchall()]
+        with measure_recall():
+            async with self.plugin.db.query(
+                f"SELECT memory_id FROM memories WHERE {predicate}",
+                params,
+            ) as cursor:
+                eligible_ids = [row[0] for row in await cursor.fetchall()]
         if not eligible_ids:
             return []
         embedding_memories = await self.plugin.ltm.search_memory(
@@ -240,12 +242,15 @@ class PassiveMemoryManager(PassiveSummaryTaskMixin):
 
         ids = [str(memory.get("id") or "") for memory in embedding_memories]
         placeholders = ",".join("?" for _ in ids)
-        async with self.plugin.db.query(
-            "SELECT memory_id, group_or_user_id, text, metadata, created_at, updated_at "
-            f"FROM memories WHERE {predicate} AND memory_id IN ({placeholders})",
-            (*params, *ids),
-        ) as cursor:
-            current = {row["memory_id"]: dict(row) for row in await cursor.fetchall()}
+        with measure_recall():
+            async with self.plugin.db.query(
+                "SELECT memory_id, group_or_user_id, text, metadata, created_at, updated_at "
+                f"FROM memories WHERE {predicate} AND memory_id IN ({placeholders})",
+                (*params, *ids),
+            ) as cursor:
+                current = {
+                    row["memory_id"]: dict(row) for row in await cursor.fetchall()
+                }
         recalled = []
         for memory in embedding_memories:
             row = current.get(memory.get("id"))

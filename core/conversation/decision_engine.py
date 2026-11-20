@@ -6,6 +6,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At
 
 from ..llm.prompt import build_decision_prompt
+from ..utils.reply_timing import ReplyTiming, collect_recall_timing
 from ..utils.schemas import MessageData
 from .media_captioner import MediaCaptioner
 from .memory_recall import search_memories_with_rerank
@@ -266,6 +267,7 @@ class DecisionEngine:
         *,
         force_reply: bool = False,
         review_context: str = "",
+        timing: ReplyTiming | None = None,
     ) -> tuple[bool, list[dict] | None, list[dict] | None, str | None]:
         """Evaluate a frozen batch; admission and scheduling belong to the caller.
 
@@ -278,6 +280,7 @@ class DecisionEngine:
             recent_messages: Frozen history, excluding messages queued for later.
             force_reply: Whether a batch member requests a direct reply.
             review_context: Deferred new messages relevant to a rejected draft.
+            timing: Optional timing for this batch's decision and reply.
 
         Returns:
             Reply choice, prompt records, pending cache records, and optional meme tags.
@@ -434,6 +437,7 @@ class DecisionEngine:
             bot_name=bot_name,
             group_or_user_id=group_or_user_id,
             use_meme_manager=getattr(self.plugin, "use_meme_manager", False),
+            timing=timing,
         )
 
         if result is None or result.reply_decision not in (0, 1):
@@ -462,14 +466,15 @@ class DecisionEngine:
 
         # 如果命中 RAG，执行记忆搜索
         if result.use_rag == 1 and self.plugin.embedding_conf.get("enabled", False):
-            memory_results = await search_memories_with_rerank(
-                self.plugin,
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                query=result.rag_query,
-                recent_messages=pending_messages,
-                log_context="决策 RAG 记忆召回",
-            )
+            with collect_recall_timing(timing):
+                memory_results = await search_memories_with_rerank(
+                    self.plugin,
+                    bot_name=bot_name,
+                    group_or_user_id=group_or_user_id,
+                    query=result.rag_query,
+                    recent_messages=pending_messages,
+                    log_context="决策 RAG 记忆召回",
+                )
             relevant_memories = list(memory_results)
             return True, relevant_memories, memory_results, result.meme_tags
 

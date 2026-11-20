@@ -16,6 +16,7 @@ from astrbot.core.utils import media_utils
 
 from ..utils.event_utils import resolve_bot_name
 from ..utils.qq_official_action import is_qq_official as is_qq_official_platform
+from ..utils.reply_timing import ReplyTiming
 from ..utils.schemas import (
     Decision,
     MediaCaption,
@@ -131,8 +132,23 @@ class CallLLM:
         bot_name: str = "",
         group_or_user_id: str = "",
         use_meme_manager: bool = False,
+        *,
+        timing: ReplyTiming | None = None,
     ) -> Decision | None:
-        """调用LLM进行决策"""
+        """Ask a model whether the bot should reply.
+
+        Args:
+            provider_ids: Decision providers in retry order.
+            system_prompt: Bot-specific decision instructions.
+            user_prompt: Frozen conversation input.
+            bot_name: Bot owning the decision.
+            group_or_user_id: Conversation owning the decision.
+            use_meme_manager: Enable external sticker instructions.
+            timing: Optional timing carried forward to the formal reply.
+
+        Returns:
+            A parsed decision or None if all attempts fail.
+        """
         bot_config = (
             self.plugin.bot_map.get(bot_name, {}) if self.plugin is not None else {}
         )
@@ -153,23 +169,31 @@ class CallLLM:
                 if i > 0:
                     logger.warning(f"LLM决策失败，{provider_id} 重试第 {i} 次")
                 try:
+                    request_started_at = time.perf_counter()
                     llm_resp = await self.provider_health.call(
                         self.context.llm_generate,
                         chat_provider_id=provider_id,
                         system_prompt=actual_system_prompt,
                         prompt=user_prompt,
                     )
+                    response_at = time.perf_counter()
                     parsed_result = None
                     is_parsed = False
-                    if llm_resp and llm_resp.completion_text:
+                    if llm_resp:
+                        completion = llm_resp.completion_text
                         logger.info(
-                            f"\n<completion>\n{llm_resp.completion_text}\n</completion>"
+                            "[Giftia] Decision LLM response in %.1f ms (provider=%s)%s",
+                            (response_at - request_started_at) * 1000,
+                            provider_id,
+                            f"\n<completion>\n{completion}\n</completion>"
+                            if completion
+                            else "",
                         )
-                        parsed_result = self.xml_parse.decode_decision_xml(
-                            llm_resp.completion_text
-                        )
-                        if parsed_result is not None:
-                            is_parsed = True
+                        if completion:
+                            parsed_result = self.xml_parse.decode_decision_xml(
+                                completion
+                            )
+                            is_parsed = parsed_result is not None
 
                     await self._log_token_usage_safely(
                         bot_name=bot_name,
@@ -182,6 +206,8 @@ class CallLLM:
                         },
                     )
                     if parsed_result is not None:
+                        if timing is not None and parsed_result.reply_decision == 1:
+                            timing.decision_response_at = response_at
                         return parsed_result
                     logger.warning(
                         f"LLM 决策 XML 解析失败，准备重试。provider_id: {provider_id}"
@@ -384,6 +410,8 @@ class CallLLM:
         persona_tools: list[str] | None = None,
         use_meme_manager: bool = False,
         tool_context: dict | None = None,
+        *,
+        timing: ReplyTiming | None = None,
     ) -> XmlLlmResult | None:
         """Generate a reply through the primary and optional fallback lists.
 
@@ -406,6 +434,7 @@ class CallLLM:
             persona_tools: Tool names allowed by the persona.
             use_meme_manager: Enable external sticker instructions.
             tool_context: Trusted state shared with tool execution.
+            timing: Optional timing from the preceding decision response.
 
         Returns:
             A valid reply, including intentional silence, or None on failure.
@@ -516,6 +545,26 @@ class CallLLM:
         logger.debug(f"\n<system_prompt>\n{actual_system_prompt}\n</system_prompt>")
         logger.debug(f"\n<user_prompt>\n{user_prompt}\n</user_prompt>")
 
+        response_seconds = 0.0
+
+        async def generate_reply(**kwargs):
+            nonlocal timing, response_seconds
+            if timing is not None and timing.decision_response_at is not None:
+                logger.debug(
+                    "[Giftia] Decision to reply (bot=%s session=%s) "
+                    "total=%.1f ms, memory recall API=%.1f ms, local queries=%.1f ms",
+                    bot_name,
+                    group_or_user_id,
+                    (time.perf_counter() - timing.decision_response_at) * 1000,
+                    timing.recall_api_seconds * 1000,
+                    timing.recall_local_query_seconds * 1000,
+                )
+                timing = None
+            started = time.perf_counter()
+            response = await self.context.tool_loop_agent(**kwargs)
+            response_seconds = time.perf_counter() - started
+            return response
+
         attempted_providers: set[str] = set()
         for is_fallback, current_providers in (
             (False, provider_ids),
@@ -540,7 +589,7 @@ class CallLLM:
                     error = None
                     try:
                         llm_resp = await self.provider_health.call(
-                            self.context.tool_loop_agent,
+                            generate_reply,
                             count_failure=lambda: not reply_hooks.called_tools,
                             chat_provider_id=provider_id,
                             **request_kwargs,
@@ -618,18 +667,23 @@ class CallLLM:
                         extra_info=extra_info,
                     )
                     if llm_resp is not None:
+                        response_log = [
+                            f"[Giftia] Reply LLM response in {response_seconds * 1000:.1f} ms "
+                            f"(provider={provider_id})"
+                        ]
                         if native_tools_called:
-                            logger.info(
-                                f"\n<tools_call>\n{native_tools_called}\n</tools_call>"
+                            response_log.append(
+                                f"<tools_call>\n{native_tools_called}\n</tools_call>"
                             )
                         if llm_resp.reasoning_content:
-                            logger.info(
-                                f"\n<reasoning>\n{llm_resp.reasoning_content}\n</reasoning>"
+                            response_log.append(
+                                f"<reasoning>\n{llm_resp.reasoning_content}\n</reasoning>"
                             )
                         if llm_resp.completion_text:
-                            logger.info(
-                                f"\n<completion>\n{llm_resp.completion_text}\n</completion>"
+                            response_log.append(
+                                f"<completion>\n{llm_resp.completion_text}\n</completion>"
                             )
+                        logger.info("\n".join(response_log))
 
                     if parsed_result is not None:
                         return parsed_result
