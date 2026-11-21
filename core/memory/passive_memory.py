@@ -6,6 +6,22 @@ from .atomic import memory_metadata
 from .passive_tasks import PassiveSummaryTaskMixin
 from .recall_scope import resolve_memory_recall_scope
 
+# Legacy timestamps are local. Convert whole seconds to UTC before adding the
+# fraction so SQLite's millisecond rounding cannot move a record across midnight.
+_CREATED_AT_ZONE = (
+    "CASE WHEN substr(created_at, -6) GLOB '[+-][0-9][0-9]:[0-9][0-9]' "
+    "THEN substr(created_at, -6) WHEN upper(substr(created_at, -1)) = 'Z' "
+    "THEN 'Z' ELSE '' END"
+)
+_CREATED_AT_SECOND = (
+    f"strftime('%s', substr(created_at, 1, 19) || ({_CREATED_AT_ZONE}), "
+    f"CASE WHEN ({_CREATED_AT_ZONE}) = '' THEN 'utc' ELSE '+0 seconds' END)"
+)
+_CREATED_AT_US = (
+    f"({_CREATED_AT_SECOND} * 1000000 + "
+    "CAST(ROUND(CAST('0' || substr(created_at, 20) AS REAL) * 1000000) AS INTEGER))"
+)
+
 
 class PassiveMemoryManager(PassiveSummaryTaskMixin):
     def __init__(self, plugin):
@@ -142,39 +158,31 @@ class PassiveMemoryManager(PassiveSummaryTaskMixin):
                 f"passive_memory:silent_count:{bot_name}:{session_id}", 0
             )
 
-    async def search_and_filter_memories(
+    async def _recall_conditions(
         self,
         bot_name: str,
         group_or_user_id: str,
-        query: str,
-        recent_messages: list = None,
-        limit: int = 5,
-        threshold: float = 0.7,
-        filter_active_users: bool = True,
-        *,
-        user_ids: list[str] | None = None,
-        raise_errors: bool = False,
-    ) -> list[dict]:
-        """Recall indexed memories within the configured recall scope.
+        recent_messages: list | None,
+        filter_active_users: bool,
+        user_ids: list[str] | None,
+        start_date: str | None,
+        end_date: str | None,
+    ) -> tuple[str, list[str]]:
+        """Build scope and creation-date filters for memory retrieval.
 
         Args:
             bot_name: Owning bot configuration.
             group_or_user_id: Current conversation and scope for unassociated facts.
-            query: Semantic recall query.
             recent_messages: Messages defining the active participants.
-            limit: Maximum vector candidates.
-            threshold: Maximum accepted vector distance.
             filter_active_users: Infer participants in user scope. When false
                 without explicit users, keep administrative searches session-local.
             user_ids: Target accounts in user scope, or an explicit narrowing
                 filter in session and all scopes. None uses the configured scope.
-            raise_errors: Propagate vector search failures for retryable maintenance.
+            start_date: Inclusive first creation date in the server's local timezone.
+            end_date: Inclusive last creation date in the server's local timezone.
 
         Returns:
-            Factual memories with matching index revisions.
-
-        Raises:
-            Exception: A vector search failed while raise_errors is true.
+            SQL predicate and its bound parameters.
         """
         recall_scope = resolve_memory_recall_scope(self.plugin)
         if not filter_active_users and user_ids is None:
@@ -218,46 +226,121 @@ class PassiveMemoryManager(PassiveSummaryTaskMixin):
                 )
             else:
                 scope = f"({scope}) AND ({user_scope})"
-        predicate = f"bot_name=? AND ({scope}) AND revision=indexed_revision"
-        with measure_recall():
-            async with self.plugin.db.query(
-                f"SELECT memory_id FROM memories WHERE {predicate}",
-                params,
-            ) as cursor:
-                eligible_ids = [row[0] for row in await cursor.fetchall()]
-        if not eligible_ids:
-            return []
-        embedding_memories = await self.plugin.ltm.search_memory(
-            bot_name=bot_name,
-            group_or_user_id=None,
-            usage_group_or_user_id=group_or_user_id,
-            query=query,
-            limit=limit,
-            threshold=threshold,
-            include_ids=eligible_ids,
-            raise_errors=raise_errors,
-        )
-        if not embedding_memories:
-            return []
+        predicate = f"bot_name=? AND ({scope})"
+        created_date = f"date({_CREATED_AT_SECOND}, 'unixepoch', 'localtime')"
+        if start_date:
+            predicate += f" AND {created_date}>=?"
+            params.append(start_date)
+        if end_date:
+            predicate += f" AND {created_date}<=?"
+            params.append(end_date)
+        return predicate, params
 
-        ids = [str(memory.get("id") or "") for memory in embedding_memories]
-        placeholders = ",".join("?" for _ in ids)
-        with measure_recall():
-            async with self.plugin.db.query(
-                "SELECT memory_id, group_or_user_id, text, metadata, created_at, updated_at "
-                f"FROM memories WHERE {predicate} AND memory_id IN ({placeholders})",
-                (*params, *ids),
-            ) as cursor:
-                current = {
-                    row["memory_id"]: dict(row) for row in await cursor.fetchall()
-                }
-        recalled = []
-        for memory in embedding_memories:
-            row = current.get(memory.get("id"))
-            if row is None:
-                continue
-            metadata = memory_metadata(row)
-            source = str(row["group_or_user_id"])
+    async def search_and_filter_memories(
+        self,
+        bot_name: str,
+        group_or_user_id: str,
+        query: str | None,
+        recent_messages: list | None = None,
+        limit: int = 5,
+        threshold: float = 0.7,
+        filter_active_users: bool = True,
+        *,
+        user_ids: list[str] | None = None,
+        raise_errors: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        sort_order: str = "desc",
+        offset: int = 0,
+    ) -> list[dict]:
+        """Search indexed memories or browse persisted memories by creation time.
+
+        Args:
+            bot_name: Owning bot configuration.
+            group_or_user_id: Current conversation and scope for unassociated facts.
+            query: Semantic recall text, or None to browse stored records.
+            recent_messages: Messages defining the active participants.
+            limit: Maximum vector candidates or browse records.
+            threshold: Maximum accepted vector distance.
+            filter_active_users: Infer participants when the configured scope uses them.
+            user_ids: Target accounts, or None to follow the configured scope.
+            raise_errors: Propagate vector search failures for retryable maintenance.
+            start_date: Inclusive first creation date in the server's local timezone.
+            end_date: Inclusive last creation date in the server's local timezone.
+            sort_order: Creation-time order when browsing.
+            offset: Number of browse records to skip.
+
+        Returns:
+            Scoped factual memories with their current text and source metadata.
+
+        Raises:
+            Exception: A vector search failed while raise_errors is true.
+        """
+        predicate, params = await self._recall_conditions(
+            bot_name,
+            group_or_user_id,
+            recent_messages,
+            filter_active_users,
+            user_ids,
+            start_date,
+            end_date,
+        )
+        select = (
+            "SELECT memory_id, group_or_user_id, text, metadata, created_at, updated_at, "
+            f"{_CREATED_AT_US} AS created_at_us FROM memories"
+        )
+        if query is None:
+            direction = "ASC" if sort_order == "asc" else "DESC"
+            with measure_recall():
+                async with self.plugin.db.query(
+                    f"{select} WHERE {predicate} "
+                    f"ORDER BY created_at_us {direction} NULLS LAST, memory_id "
+                    "LIMIT ? OFFSET ?",
+                    (*params, limit, offset),
+                ) as cursor:
+                    memories = [dict(row) for row in await cursor.fetchall()]
+        else:
+            predicate += " AND revision=indexed_revision"
+            with measure_recall():
+                async with self.plugin.db.query(
+                    f"SELECT memory_id FROM memories WHERE {predicate}",
+                    params,
+                ) as cursor:
+                    eligible_ids = [row[0] for row in await cursor.fetchall()]
+            if not eligible_ids:
+                return []
+            embedding_memories = await self.plugin.ltm.search_memory(
+                bot_name=bot_name,
+                group_or_user_id=None,
+                usage_group_or_user_id=group_or_user_id,
+                query=query,
+                limit=limit,
+                threshold=threshold,
+                include_ids=eligible_ids,
+                raise_errors=raise_errors,
+            )
+            if not embedding_memories:
+                return []
+
+            ids = [str(memory.get("id") or "") for memory in embedding_memories]
+            placeholders = ",".join("?" for _ in ids)
+            with measure_recall():
+                async with self.plugin.db.query(
+                    f"{select} WHERE {predicate} AND memory_id IN ({placeholders})",
+                    (*params, *ids),
+                ) as cursor:
+                    current = {
+                        row["memory_id"]: dict(row) for row in await cursor.fetchall()
+                    }
+            memories = [
+                {**memory, **current[memory["id"]]}
+                for memory in embedding_memories
+                if memory.get("id") in current
+            ]
+
+        for memory in memories:
+            metadata = memory_metadata(memory)
+            source = str(memory["group_or_user_id"])
             metadata["source_session_id"] = source
             metadata["source_label"] = ""
             if source != str(group_or_user_id):
@@ -267,14 +350,8 @@ class PassiveMemoryManager(PassiveSummaryTaskMixin):
                     str(uid) for uid in associated_users
                 }:
                     metadata["source_label"] = "来源私聊"
-            recalled.append(
-                {
-                    **memory,
-                    **row,
-                    "metadata": json.dumps(metadata, ensure_ascii=False),
-                }
-            )
-        return recalled
+            memory["metadata"] = json.dumps(metadata, ensure_ascii=False)
+        return memories
 
     async def check_and_trigger_passive_memory(
         self,

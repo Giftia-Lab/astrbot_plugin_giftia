@@ -280,10 +280,14 @@ Disabled tools are not registered or injected, and invocation paths also reject 
 
 | Function tool | Purpose | Arguments |
 | --- | --- | --- |
-| `search_memory` | Query long-term memory | `query`, optional `user_id` |
+| `search_memory` | Search or browse long-term memory | `query`, `user_id`, `start_date`, `end_date`, `page`, `page_size`, and `sort_order` are all optional |
 | `create_scheduled_task` | Create a reminder | Creator `user_id`, five-field Cron or ISO8601 `time_expr`, reminder `content` |
 | `list_scheduled_tasks` | List reminders in this conversation | None |
 | `delete_scheduled_task` | Delete a reminder | Actual `task_id` returned by listing |
+
+Omit `query` or leave it blank to browse stored memories, including records awaiting indexing. Providing `query` runs semantic search. The candidate limit, relevance thresholds, and reranking settings determine which matches are available to page through.
+
+Set either `start_date` or `end_date` in `YYYY-MM-DD` format to filter by creation date in the bot server's local timezone. Both endpoints include the entire day. Results are ordered by creation time, with `desc` (default) showing newest first and `asc` showing oldest first. `page` starts at 1 and `page_size` defaults to 10, with a range of 1–50. `count` is the number of results on the current page. When `has_more` is `true`, increment `page` and reuse the same filters to continue. For example, `{"start_date":"2026-11-01","end_date":"2026-11-07","page":2,"page_size":5}` retrieves the second page in that date range.
 
 With native calling, the model can refine a memory query or list reminders and then delete one by its returned ID, all before producing the final XML reply. Missing time, content or creator details can be clarified with the user and supplied in a later conversation turn. When forced XML is enabled, use the standard `<tool_call name="tool_name">JSON arguments</tool_call>` format, for example `<tool_call name="search_memory">{"query":"past agreement","user_id":"12345"}</tool_call>`.
 

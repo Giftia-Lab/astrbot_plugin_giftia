@@ -48,6 +48,8 @@ async def search_memories_with_rerank(
     log_context: str = "记忆召回",
     record_hits: bool = True,
     user_ids: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> list[dict]:
     """Search memories using the shared embedding and rerank settings.
 
@@ -63,6 +65,8 @@ async def search_memories_with_rerank(
         record_hits: Record hits immediately; batch callers may defer until deduplication.
         user_ids: Target accounts in user scope, or an explicit narrowing filter
             in other scopes. None follows the configured recall scope.
+        start_date: Inclusive first creation date, applied before vector search.
+        end_date: Inclusive last creation date, applied before vector search.
 
     Returns:
         Recalled memory records, optionally filtered by the reranker.
@@ -92,6 +96,8 @@ async def search_memories_with_rerank(
             limit=search_limit,
             threshold=threshold,
             user_ids=user_ids,
+            start_date=start_date,
+            end_date=end_date,
         )
         if memories and plugin.rerank_conf.get("enabled", False):
             memories = await plugin.ltm.rerank_memories(

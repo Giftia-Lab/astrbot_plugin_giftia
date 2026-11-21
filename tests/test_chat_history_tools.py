@@ -390,6 +390,7 @@ async def test_memory_tool_and_automatic_recall_locate_the_same_original_context
     plugin = runtime.tools["get_message_context"].plugin
     plugin.bot_map = {"bot": {}}
     plugin.embedding_conf = {"enabled": True}
+    plugin.data_cache.record_memory_hits = AsyncMock()
     source_messages = await plugin.db.get_message_context(
         "shared-target", source_session, "bot", limit=1
     )
