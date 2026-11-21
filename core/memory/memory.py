@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from astrbot.api import logger
 from astrbot.api.star import Context, StarTools
 
+from ..utils.reply_timing import measure_recall
+
 
 def get_memory_schema(dim: int):
     from lancedb.pydantic import LanceModel, Vector
@@ -513,7 +515,8 @@ class LTM:
                 return []
             try:
                 async with self._track_model_call("embedding", bot_name, usage_session):
-                    query_vector = await self.embed_provider.get_embedding(query)
+                    with measure_recall(api=True):
+                        query_vector = await self.embed_provider.get_embedding(query)
             except Exception as e:
                 logger.error(f"[Giftia LTM] 外部 Embedding 搜索向量获取失败: {e}")
                 if raise_errors:
@@ -536,12 +539,13 @@ class LTM:
                         "'" + key.replace("'", "''") + "'" for key in include_ids
                     )
                     condition += f" AND id IN ({included})"
-                results = (
-                    self.table.search(query_vector)
-                    .where(condition, prefilter=True)
-                    .limit(limit)
-                    .to_list()
-                )
+                with measure_recall():
+                    results = (
+                        self.table.search(query_vector)
+                        .where(condition, prefilter=True)
+                        .limit(limit)
+                        .to_list()
+                    )
                 if threshold is not None:
                     results = [r for r in results if r.get("_distance", 0) <= threshold]
                 return results
@@ -551,10 +555,9 @@ class LTM:
                     raise
                 return []
         else:
-            loop = asyncio.get_running_loop()
             async with self._track_model_call("embedding", bot_name, usage_session):
-                return await loop.run_in_executor(
-                    None,
+                # Propagate the current reply's timing to the local search thread.
+                return await asyncio.to_thread(
                     self._search_memory_sync,
                     bot_name,
                     group_or_user_id,
@@ -624,12 +627,13 @@ class LTM:
                     "'" + key.replace("'", "''") + "'" for key in include_ids
                 )
                 condition += f" AND id IN ({included})"
-            results = (
-                self.table.search(query_vector)
-                .where(condition, prefilter=True)
-                .limit(limit)
-                .to_list()
-            )
+            with measure_recall():
+                results = (
+                    self.table.search(query_vector)
+                    .where(condition, prefilter=True)
+                    .limit(limit)
+                    .to_list()
+                )
             # 过滤低相关性条目 (LanceDB 的 _distance 越小代表越相似)
             if threshold is not None:
                 results = [r for r in results if r.get("_distance", 0) <= threshold]
@@ -736,9 +740,10 @@ class LTM:
                     return []
 
                 async with self._track_model_call("rerank", bot_name, group_or_user_id):
-                    rerank_results = await self.rerank_provider.rerank(
-                        query, memory_texts, top_n=top_k
-                    )
+                    with measure_recall(api=True):
+                        rerank_results = await self.rerank_provider.rerank(
+                            query, memory_texts, top_n=top_k
+                        )
 
                 reranked_memories = []
                 for result in rerank_results:

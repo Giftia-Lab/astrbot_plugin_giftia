@@ -60,6 +60,8 @@ class ProviderHealth:
         self._monitor_task: asyncio.Task | None = None
         self.enabled = True
         self.disabled_provider_ids: set[str] = set()
+        self.prompt_suffix = ""
+        self.prompt_suffix_provider_ids: set[str] = set()
         self._settings_lock = asyncio.Lock()
         self._probe_requests: dict[str, asyncio.Future] = {}
 
@@ -69,6 +71,26 @@ class ProviderHealth:
         Args:
             database: Plugin database containing the shared settings.
         """
+        raw_suffix = await database.get_kv_data("provider_prompt_suffix")
+        if raw_suffix is not None:
+            try:
+                suffix_settings = json.loads(raw_suffix)
+                text = suffix_settings["text"]
+                provider_ids = suffix_settings["provider_ids"]
+                if (
+                    not isinstance(text, str)
+                    or not isinstance(provider_ids, list)
+                    or any(
+                        not isinstance(item, str) or not item for item in provider_ids
+                    )
+                ):
+                    raise ValueError("Invalid provider prompt suffix settings")
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Ignoring malformed provider prompt suffix settings")
+            else:
+                self.prompt_suffix = text.strip()
+                self.prompt_suffix_provider_ids = set(provider_ids)
+
         raw = await database.get_kv_data("provider_health_settings")
         if raw is None:
             return
@@ -89,6 +111,43 @@ class ProviderHealth:
             return
         self.enabled = settings["enabled"]
         self.disabled_provider_ids = set(settings["disabled_provider_ids"])
+
+    async def update_prompt_suffix(
+        self,
+        database,
+        *,
+        text: str | None = None,
+        provider_ids: set[str] | None = None,
+        provider_id: str | None = None,
+        enabled: bool = False,
+    ) -> None:
+        """Persist a prompt setting change and merge it with the current settings.
+
+        Args:
+            database: Plugin database containing the shared settings.
+            text: Replacement suffix, or None to preserve the saved text.
+            provider_ids: Complete selection from older callers, if supplied.
+            provider_id: Provider whose injection switch changed, if supplied.
+            enabled: Whether to inject the suffix for that provider.
+        """
+        async with self._settings_lock:
+            suffix = self.prompt_suffix if text is None else text.strip()
+            selected = (
+                self.prompt_suffix_provider_ids
+                if provider_ids is None
+                else provider_ids
+            ).copy()
+            if provider_id is not None:
+                if enabled:
+                    selected.add(provider_id)
+                else:
+                    selected.discard(provider_id)
+            await database.upsert_kv_data(
+                "provider_prompt_suffix",
+                json.dumps({"text": suffix, "provider_ids": sorted(selected)}),
+            )
+            self.prompt_suffix = suffix
+            self.prompt_suffix_provider_ids = selected
 
     async def update_settings(
         self, database, *, enabled: bool, provider_id: str | None = None
@@ -335,6 +394,20 @@ class ProviderHealth:
             kwargs["chat_provider_id"] = provider_id
             # Giftia owns retries; avoid stacking AstrBot's default attempts.
             kwargs["request_max_retries"] = 1
+        if (
+            not force_probe
+            and self.prompt_suffix
+            and provider_id in self.prompt_suffix_provider_ids
+        ):
+            prompt_key = "state" if decision else "prompt"
+            prompt = kwargs.get(prompt_key)
+            if isinstance(prompt, str):
+                # Only modify the kwargs for this attempt.
+                kwargs[prompt_key] = (
+                    f"{prompt}\n\n{self.prompt_suffix}"
+                    if prompt
+                    else self.prompt_suffix
+                )
         # Keep the existing request and timeout policy when management is off.
         if not self.enabled:
             pending = operation(**kwargs)

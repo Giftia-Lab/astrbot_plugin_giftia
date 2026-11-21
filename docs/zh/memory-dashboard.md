@@ -280,10 +280,14 @@ Bot 内部回复上下文和画像查询工具保留非本会话记录及来源�
 
 | 函数工具 | 用途 | 参数 |
 | --- | --- | --- |
-| `search_memory` | 查询长期记忆 | `query`，可选 `user_id` |
+| `search_memory` | 查询或浏览长期记忆 | `query`、`user_id`、`start_date`、`end_date`、`page`、`page_size`、`sort_order`，均可选 |
 | `create_scheduled_task` | 创建定时提醒 | 创建者 `user_id`、五段 Cron 或 ISO8601 时间 `time_expr`、提醒 `content` |
 | `list_scheduled_tasks` | 列出当前会话提醒 | 无 |
 | `delete_scheduled_task` | 删除提醒 | 查询返回的真实 `task_id` |
+
+`search_memory` 省略或留空 `query` 时直接浏览已保存的记忆，包含待索引记录。提供 `query` 时使用嵌入模型进行语义检索，分页范围受候选数量、相关性阈值和重排配置限制。
+
+`start_date` 与 `end_date` 可独立使用，格式为 `YYYY-MM-DD`。工具按 Bot 服务器本地时区筛选记忆的创建日期，包含起止当天。结果按创建时间排序，`desc`（默认）从新到旧，`asc` 从旧到新。`page` 从 1 开始，`page_size` 默认 10，范围为 1–50。返回的 `count` 为本页条数，`has_more` 为 `true` 时可沿用原条件查询下一页。例如可以用 `{"start_date":"2026-11-01","end_date":"2026-11-07","page":2,"page_size":5}` 查看指定日期范围的第二页。
 
 原生调用时，模型可在工具循环中换关键词继续查询，或先列出任务、再按返回的 ID 删除，读取真实结果后才生成最终 XML 回复。时间、内容或创建者不明确时先向用户询问，在后续对话中继续操作。开启强制 XML 后使用统一的 `<tool_call name="工具名">参数JSON</tool_call>`，例如 `<tool_call name="search_memory">{"query":"过往约定","user_id":"12345"}</tool_call>`。
 

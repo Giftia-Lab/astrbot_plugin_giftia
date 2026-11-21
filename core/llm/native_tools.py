@@ -3,7 +3,7 @@
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from astrbot.api import FunctionTool
@@ -22,6 +22,8 @@ NATIVE_TOOL_CONFIG_KEYS = {
     "list_scheduled_tasks": "scheduled_tasks_enabled",
     "delete_scheduled_task": "scheduled_tasks_enabled",
 }
+DEFAULT_MEMORY_PAGE_SIZE = 10
+MAX_MEMORY_PAGE_SIZE = 50
 
 
 def _tool_scope(plugin, context, name: str) -> tuple[Any, dict]:
@@ -112,57 +114,159 @@ def _session_reminders(plugin, state: dict) -> list:
 class SearchMemoryTool(FunctionTool):
     plugin: Any = None
     name: str = "search_memory"
-    description: str = "按配置的召回范围检索当前 Bot 的长期记忆，可继续换关键词或指定用户缩小范围，再组织最终回复。非本会话记录标注来源。"
+    description: str = (
+        "按配置的召回范围检索自身的长期记忆。所有参数均可省略，"
+        "省略 query 时浏览已保存的记忆。可按创建日期筛选并翻页，默认最新记录在前。"
+    )
     parameters: dict = field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "需要回忆的问题或关键词。"},
+                "query": {
+                    "type": "string",
+                    "description": "语义检索的问题或关键词。省略或留空时按条件浏览记忆。",
+                },
                 "user_id": {
                     "type": "string",
-                    "description": "可选目标用户 ID，只能缩小配置允许的召回范围；省略时按配置检索，用户隔离模式使用本批参与者。",
+                    "description": "可选目标用户 ID，只能缩小配置允许的召回范围。",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "创建日期下限，YYYY-MM-DD，包含当天。",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "创建日期上限，YYYY-MM-DD，包含当天。",
+                },
+                "page": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 1,
+                    "description": "页码，从 1 开始。返回 has_more 为 true 时可查询下一页。",
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_MEMORY_PAGE_SIZE,
+                    "default": DEFAULT_MEMORY_PAGE_SIZE,
+                    "description": "每页最多返回的记忆条数。",
+                },
+                "sort_order": {
+                    "type": "string",
+                    "enum": ["asc", "desc"],
+                    "default": "desc",
+                    "description": "按记忆创建时间排序。asc 从旧到新，desc 从新到旧。",
                 },
             },
-            "required": ["query"],
+            "required": [],
         }
     )
 
     async def call(
-        self, context: ContextWrapper[AstrAgentContext], query: str, user_id: str = ""
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        query: str | None = None,
+        user_id: str = "",
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        page: int = 1,
+        page_size: int = DEFAULT_MEMORY_PAGE_SIZE,
+        sort_order: str = "desc",
     ) -> str:
-        """Return compact factual context after semantic search and reranking.
+        """Return a page of memory context in creation-time order.
 
         Args:
             context: Trusted agent run context.
-            query: Semantic recall query.
+            query: Semantic recall query, or empty to browse saved memories.
             user_id: Optional explicit target account.
+            start_date: Inclusive first creation date.
+            end_date: Inclusive last creation date.
+            page: One-based page number.
+            page_size: Maximum records on this page.
+            sort_order: Ascending or descending creation-time order.
 
         Returns:
-            JSON containing facts and sources, or an actionable error.
+            JSON containing memory context and pagination, or an actionable error.
         """
         try:
             _, state = _tool_scope(self.plugin, context, self.name)
-            if not isinstance(query, str) or not query.strip():
-                raise ValueError("查询内容不能为空")
-            if not self.plugin.embedding_conf.get("enabled", False):
-                raise ValueError("长期记忆检索未启用嵌入模型")
+            if query is not None and not isinstance(query, str):
+                raise ValueError("query 必须为字符串")
+            query = (query or "").strip()
+            for name, value in (("start_date", start_date), ("end_date", end_date)):
+                if value in (None, ""):
+                    continue
+                try:
+                    if date.fromisoformat(value).isoformat() == value:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                raise ValueError(f"{name} 必须是有效的 YYYY-MM-DD 日期")
+            if start_date and end_date and start_date > end_date:
+                raise ValueError("start_date 不能晚于 end_date")
+            if type(page) is not int or page < 1:
+                raise ValueError("page 必须为正整数")
+            if type(page_size) is not int or not 1 <= page_size <= MAX_MEMORY_PAGE_SIZE:
+                raise ValueError(f"page_size 必须为 1 到 {MAX_MEMORY_PAGE_SIZE} 的整数")
+            if sort_order not in ("asc", "desc"):
+                raise ValueError("sort_order 必须为 asc 或 desc")
+            offset = (page - 1) * page_size
+            if offset > (1 << 63) - 1:
+                raise ValueError("page 超出允许范围")
+
             target = str(user_id or "").strip()
             user_ids = [target] if target else None
             if not target and resolve_memory_recall_scope(self.plugin) == "user":
                 user_ids = state["user_ids"]
-            memories = await search_memories_with_rerank(
-                self.plugin,
-                bot_name=state["bot_name"],
-                group_or_user_id=state["session_id"],
-                query=query.strip(),
-                recent_messages=[],
-                user_ids=user_ids,
-                log_context="工具记忆检索",
-            )
+            filters = {
+                "bot_name": state["bot_name"],
+                "group_or_user_id": state["session_id"],
+                "recent_messages": [],
+                "user_ids": user_ids,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+            if query:
+                if not self.plugin.embedding_conf.get("enabled", False):
+                    raise ValueError("长期记忆语义检索未启用嵌入模型")
+                memories = await search_memories_with_rerank(
+                    self.plugin,
+                    query=query,
+                    log_context="Explicit memory search",
+                    record_hits=False,
+                    **filters,
+                )
+                direction = 1 if sort_order == "asc" else -1
+                memories.sort(
+                    key=lambda memory: (
+                        memory.get("created_at_us") is None,
+                        (memory.get("created_at_us") or 0) * direction,
+                        str(memory.get("memory_id") or memory.get("id") or ""),
+                    )
+                )
+                memories = memories[offset : offset + page_size + 1]
+            else:
+                memories = (
+                    await self.plugin.passive_memory_manager.search_and_filter_memories(
+                        query=None,
+                        limit=page_size + 1,
+                        sort_order=sort_order,
+                        offset=offset,
+                        **filters,
+                    )
+                )
+            has_more = len(memories) > page_size
+            memories = memories[:page_size]
+            if memories:
+                await self.plugin.data_cache.record_memory_hits(memories)
             return json.dumps(
                 {
                     "status": "success",
                     "count": len(memories),
+                    "page": page,
+                    "page_size": page_size,
+                    "has_more": has_more,
                     "memory_context": build_memory_items(
                         memories, current_session_id=state["session_id"]
                     ),

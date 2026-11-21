@@ -19,6 +19,7 @@ from ..memory.recall_scope import (
     select_automatic_recall_memories,
 )
 from ..utils.anti_drool import filter_duplicate_replies
+from ..utils.reply_timing import ReplyTiming, collect_recall_timing, measure_recall
 from ..utils.schemas import IMAGE_METADATA_PATTERN, MediaCaption, MessageData
 from .context_window import ContextWindows
 from .media_captioner import MediaCaptioner
@@ -228,6 +229,7 @@ class ReplyPipeline:
         cross_group_context: dict[str, list[MessageData]] | None = None,
         cross_group_names: dict[str, str] | None = None,
         delegation_delivery: bool = False,
+        timing: ReplyTiming | None = None,
     ):
         """Generate frozen reply turns and review the first eligible unsent draft.
 
@@ -252,6 +254,7 @@ class ReplyPipeline:
             cross_group_context: Source-group windows frozen across tool turns.
             cross_group_names: Known names for the frozen source-group windows.
             delegation_delivery: Resume a completed background task for its user.
+            timing: Timing for the first reply request after a batch decision.
 
         Yields:
             Parsed reply results ready for action dispatch.
@@ -349,14 +352,15 @@ class ReplyPipeline:
             relevant_memories = []
 
         if times == 0:
-            current_recall_memories = await self._search_current_recall_memories(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                reply_messages=reply_messages,
-                remind_message=remind_message,
-                recent_messages=recent_messages,
-                media_captions=media_captions,
-            )
+            with collect_recall_timing(timing):
+                current_recall_memories = await self._search_current_recall_memories(
+                    bot_name=bot_name,
+                    group_or_user_id=group_or_user_id,
+                    reply_messages=reply_messages,
+                    remind_message=remind_message,
+                    recent_messages=recent_messages,
+                    media_captions=media_captions,
+                )
             if current_recall_memories:
                 pending_recall_memories.extend(current_recall_memories)
 
@@ -369,13 +373,14 @@ class ReplyPipeline:
                 for msg in reply_messages
                 if msg.user_id and msg.role == "message" and not msg.is_recalled
             } or {str(event.get_sender_id())}
-            cached_memories = self.plugin.data_cache.get_session_recalled_memories(
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-                max_items=max_items,
-                ttl_seconds=ttl_seconds,
-                user_ids=list(recall_users) if recall_scope == "all" else None,
-            )
+            with collect_recall_timing(timing), measure_recall():
+                cached_memories = self.plugin.data_cache.get_session_recalled_memories(
+                    bot_name=bot_name,
+                    group_or_user_id=group_or_user_id,
+                    max_items=max_items,
+                    ttl_seconds=ttl_seconds,
+                    user_ids=list(recall_users) if recall_scope == "all" else None,
+                )
             seen_ids = {
                 str(memory.get("memory_id") or memory.get("id") or "")
                 for memory in relevant_memories
@@ -708,6 +713,7 @@ class ReplyPipeline:
             timeout=self.plugin.tools_config.get("timeout", 120),
             tool_context=tool_context,
             use_meme_manager=getattr(self.plugin, "use_meme_manager", False),
+            timing=timing,
         )
 
         if not llm_result:

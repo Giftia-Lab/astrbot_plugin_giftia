@@ -366,6 +366,7 @@ async def test_tool_search_keeps_structured_records_and_deduplicates_by_internal
     monkeypatch.setattr("core.llm.native_tools.search_memories_with_rerank", search)
     plugin = SimpleNamespace(
         embedding_conf={"enabled": True},
+        data_cache=SimpleNamespace(record_memory_hits=AsyncMock()),
         adapter_id_map={"adapter": "bot"},
         bot_map={"bot": {}},
     )

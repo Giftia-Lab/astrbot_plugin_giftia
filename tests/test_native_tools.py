@@ -293,13 +293,16 @@ async def test_memory_tool_keeps_user_scope_sources_and_multiple_searches(runtim
     first = json.loads(await rt.tools["search_memory"].call(rt.run, "photography"))
     second = json.loads(await rt.tools["search_memory"].call(rt.run, "camera", "carol"))
     assert first["status"] == second["status"] == "success"
+    assert rt.tools["search_memory"].parameters["required"] == []
     assert "来源群聊：other" in first["memory_context"]
     for result in (first, second):
         memory = fromstring(result["memory_context"])
         assert memory.attrib["message_id"] == "original-message"
         assert memory.attrib["source"] == "来源群聊：other"
         assert "source_session_id" not in result["memory_context"]
-        assert set(result) == {"status", "count", "memory_context"}
+        assert result["page"] == 1
+        assert result["page_size"] == 10
+        assert result["has_more"] is False
     assert (
         "hidden quote" not in first["memory_context"]
         and "hidden-id" not in first["memory_context"]
@@ -311,6 +314,25 @@ async def test_memory_tool_keeps_user_scope_sources_and_multiple_searches(runtim
         for call in calls
     )
     assert rt.plugin.data_cache.record_memory_hits.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments,field",
+    [
+        ({"start_date": "2026-02-29"}, "start_date"),
+        ({"end_date": "20261120"}, "end_date"),
+        ({"start_date": "2026-11-21", "end_date": "2026-11-20"}, "start_date"),
+        ({"page": True}, "page"),
+        ({"page_size": 51}, "page_size"),
+        ({"sort_order": "updated_at"}, "sort_order"),
+    ],
+)
+async def test_memory_tool_rejects_invalid_filters(runtime, arguments, field):
+    rt = runtime
+    result = json.loads(await rt.tools["search_memory"].call(rt.run, **arguments))
+    assert result["status"] == "error" and field in result["message"]
+    rt.plugin.passive_memory_manager.search_and_filter_memories.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -682,7 +704,8 @@ async def test_xml_tools_preserve_scope_creators_and_idempotency_across_outputs(
     result = await parser.decode_llm_xml(
         '<tool_call name="list_scheduled_tasks">{}</tool_call>'
         '<tool_call name="create_scheduled_task">{"user_id":"carol","time_expr":"0 10 * * *","content":"new"}</tool_call>'
-        '<tool_call name="search_memory">{"query":"old agreement"}</tool_call>',
+        '<tool_call name="search_memory">{"query":"old agreement"}</tool_call>'
+        '<tool_call name="search_memory">{"start_date":"2026-11-01","sort_order":"asc","page":2,"page_size":3}</tool_call>',
         "group",
     )
     result.tool_context = rt.state
@@ -698,14 +721,19 @@ async def test_xml_tools_preserve_scope_creators_and_idempotency_across_outputs(
         "success",
         "created",
         "success",
+        "success",
     ]
+    assert outputs[-1]["page"] == 2 and outputs[-1]["has_more"] is False
     assert rt.state["creator_names"]["carol"] == "Carol"
-    search_users = (
-        rt.plugin.passive_memory_manager.search_and_filter_memories.call_args.kwargs[
-            "user_ids"
-        ]
+    search, browse = (
+        rt.plugin.passive_memory_manager.search_and_filter_memories.await_args_list
     )
-    assert search_users == (["alice", "bob"] if recall_scope == "user" else None)
+    expected_users = ["alice", "bob"] if recall_scope == "user" else None
+    assert search.kwargs["user_ids"] == browse.kwargs["user_ids"] == expected_users
+    assert browse.kwargs["query"] is None
+    assert browse.kwargs["start_date"] == "2026-11-01"
+    assert browse.kwargs["sort_order"] == "asc"
+    assert browse.kwargs["limit"] == 4 and browse.kwargs["offset"] == 3
     continuation = await parser.decode_llm_xml(
         '<tool_call name="create_scheduled_task">{"user_id":"carol","time_expr":"0 10 * * *","content":"new"}</tool_call>'
         f'<tool_call name="delete_scheduled_task">{json.dumps({"task_id": outputs[1]["task_id"]})}</tool_call>',

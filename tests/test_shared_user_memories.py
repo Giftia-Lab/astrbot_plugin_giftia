@@ -1,6 +1,7 @@
 """Exercise cross-conversation user recall against SQLite and LanceDB."""
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from xml.etree.ElementTree import fromstring
@@ -60,15 +61,24 @@ async def runtime(tmp_path, monkeypatch, request):
         distance=0.2,
         metadata=None,
         indexed=True,
+        created_at=None,
     ):
         saved = (
             metadata if metadata is not None else {"associated_user_ids": users or []}
         )
         encoded = saved if isinstance(saved, str) else json.dumps(saved)
         await db.conn.execute(
-            "INSERT INTO memories (bot_name, group_or_user_id, memory_id, text, metadata, revision, indexed_revision) "
-            "VALUES (?, ?, ?, ?, ?, 1, ?)",
-            (bot, session, memory_id, f"fact {memory_id} <&>", encoded, int(indexed)),
+            "INSERT INTO memories (bot_name, group_or_user_id, memory_id, text, metadata, revision, indexed_revision, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+            (
+                bot,
+                session,
+                memory_id,
+                f"fact {memory_id} <&>",
+                encoded,
+                int(indexed),
+                created_at,
+            ),
         )
         await db.conn.commit()
         ltm.table.add(
@@ -98,6 +108,20 @@ async def runtime(tmp_path, monkeypatch, request):
     finally:
         await plugin.passive_memory_manager.close()
         await db.close()
+
+
+@pytest.fixture
+def memory_tool(runtime):
+    runtime.plugin.adapter_id_map = {"adapter": "bot"}
+    runtime.plugin.bot_map = {"bot": {}}
+    event = SimpleNamespace(
+        platform_meta=SimpleNamespace(id="adapter"),
+        get_group_id=lambda: "current",
+        get_sender_id=lambda: "bob",
+        get_sender_name=lambda: "Bob",
+    )
+    context = SimpleNamespace(context=SimpleNamespace(event=event, extra={}))
+    return SearchMemoryTool(plugin=runtime.plugin), context
 
 
 @pytest.mark.asyncio
@@ -421,7 +445,7 @@ async def test_native_search_targets_user_without_reinterpreting_it_as_a_group(
     ],
 )
 async def test_memory_tool_follows_scope_with_optional_explicit_user(
-    runtime, scope, target, expected
+    runtime, memory_tool, scope, target, expected
 ):
     rt = runtime
     rt.plugin.memory_recall_scope = scope
@@ -429,26 +453,121 @@ async def test_memory_tool_follows_scope_with_optional_explicit_user(
         for user in ["alice", "bob"]:
             await rt.seed(f"{prefix}-{user}", [user], session=session)
     await rt.seed("other-bot", ["alice"], bot="other")
-    rt.plugin.adapter_id_map = {"adapter": "bot"}
-    rt.plugin.bot_map = {"bot": {}}
-    event = SimpleNamespace(
-        platform_meta=SimpleNamespace(id="adapter"),
-        get_group_id=lambda: "current",
-        get_sender_id=lambda: "bob",
-        get_sender_name=lambda: "Bob",
-    )
-    context = SimpleNamespace(context=SimpleNamespace(event=event, extra={}))
 
-    result = json.loads(
-        await SearchMemoryTool(plugin=rt.plugin).call(context, "topic", target)
-    )
+    tool, context = memory_tool
+    for query in ("topic", None):
+        result = json.loads(await tool.call(context, query, target))
 
-    assert result["status"] == "success"
-    assert result["count"] == len(expected)
-    assert {
-        item.text
-        for item in fromstring("<context>" + result["memory_context"] + "</context>")
-    } == {f"fact {memory_id} <&>" for memory_id in expected}
+        assert result["status"] == "success"
+        assert result["count"] == len(expected)
+        rendered = fromstring(f"<context>{result['memory_context']}</context>")
+        assert {item.text for item in rendered} == {
+            f"fact {memory_id} <&>" for memory_id in expected
+        }
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_browses_local_dates_in_creation_order_without_embeddings(
+    runtime, memory_tool
+):
+    rt = runtime
+    rt.plugin.embedding_conf["enabled"] = False
+    rt.ltm.search_memory = AsyncMock()
+    midnight = datetime(2026, 11, 20)
+    next_midnight = midnight + timedelta(days=1)
+    await rt.seed(
+        "legacy-start",
+        session="current",
+        created_at=midnight.isoformat(sep=" "),
+    )
+    for memory_id, local_time in (
+        ("earlier-day", midnight - timedelta(microseconds=1)),
+        ("z-earlier", midnight + timedelta(hours=12, microseconds=1)),
+        ("a-later", midnight + timedelta(hours=12, microseconds=2)),
+        ("end-of-day", next_midnight - timedelta(microseconds=1)),
+        ("following-day", next_midnight),
+    ):
+        await rt.seed(
+            memory_id,
+            ["bob"],
+            created_at=local_time.astimezone(timezone.utc).isoformat(),
+            indexed=memory_id != "a-later",
+        )
+    await rt.seed("unknown-date", ["bob"])
+
+    tool, context = memory_tool
+    latest = json.loads(await tool.call(context, page_size=1))
+    assert "fact following-day " in latest["memory_context"]
+    assert latest["has_more"] is True
+
+    for options, expected, has_more in (
+        ({}, ["end-of-day", "a-later"], True),
+        ({"page": 2}, ["z-earlier", "legacy-start"], False),
+        ({"sort_order": "asc", "query": "  "}, ["legacy-start", "z-earlier"], True),
+        ({"page": 3}, [], False),
+    ):
+        result = json.loads(
+            await tool.call(
+                context,
+                start_date="2026-11-20",
+                end_date="2026-11-20",
+                page_size=2,
+                **options,
+            )
+        )
+        assert result["status"] == "success"
+        assert result["count"] == len(expected)
+        assert result["has_more"] is has_more
+        rendered = fromstring(f"<context>{result['memory_context']}</context>")
+        assert [item.text for item in rendered] == [
+            f"fact {memory_id} <&>" for memory_id in expected
+        ]
+    rt.ltm.search_memory.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_filters_semantic_candidates_then_pages_reranked_matches(
+    runtime, memory_tool
+):
+    rt = runtime
+    rt.plugin.embedding_conf["limit"] = 3
+    rt.plugin.rerank_conf = {"enabled": True, "top_k": 2}
+    rt.ltm.rerank_memories = AsyncMock(
+        side_effect=lambda **kwargs: kwargs["memories"][: kwargs["top_k"]]
+    )
+    for memory_id, created_at, distance in (
+        ("outside-range", "2026-11-21 08:00:00", 0.0),
+        ("older-match", "2026-11-20 08:00:00", 0.1),
+        ("newer-match", "2026-11-20 09:00:00", 0.2),
+        ("lower-ranked", "2026-11-20 10:00:00", 0.3),
+    ):
+        await rt.seed(memory_id, ["bob"], created_at=created_at, distance=distance)
+
+    tool, context = memory_tool
+    for page, expected in ((1, "newer-match"), (2, "older-match")):
+        result = json.loads(
+            await tool.call(
+                context,
+                query="topic",
+                end_date="2026-11-20",
+                page=page,
+                page_size=1,
+            )
+        )
+        assert result["count"] == 1
+        assert result["has_more"] is (page == 1)
+        assert fromstring(result["memory_context"]).text == f"fact {expected} <&>"
+    assert [
+        item["memory_id"]
+        for item in rt.ltm.rerank_memories.await_args.kwargs["memories"]
+    ] == ["older-match", "newer-match", "lower-ranked"]
+    async with rt.db.query("SELECT memory_id, hit_count FROM memories") as cursor:
+        assert dict(await cursor.fetchall()) == {
+            "outside-range": 0,
+            "older-match": 1,
+            "newer-match": 1,
+            "lower-ranked": 0,
+        }
 
 
 @pytest.mark.asyncio

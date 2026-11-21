@@ -4,11 +4,17 @@ Open **模型状态 (Model status)** in Giftia WebUI to see configured providers
 
 ![Model health and connectivity tests](../images/model-health.jpg)
 
-Each provider/model has one displayed name. Usage stays on one line until **展开 (Expand)** is selected; use **收起 (Collapse)** to close it. Expanded usage stays open during automatic refreshes. Phones and other narrow screens use cards with wrapping names, health, request times, test and disable buttons.
+Each provider shows its name and `provider_id` so you can distinguish different configurations. Select **展开 (Expand)** to see all uses and **收起 (Collapse)** to return to one line. Expanded usage stays open during automatic refreshes. Phones and other narrow screens use cards with wrapping names, health, request times, test and disable buttons.
 
 ![Mobile model status with expanded usage](../images/model-health-mobile.png)
 
 Decisions, session completion checks, formal replies, invalid-output fallback, reply review, subagents, image/audio/video captions, sticker analysis, media inspection, memory and affinity summaries, and forwarded-message summaries share one in-memory health tracker keyed by AstrBot `provider_id`. Different configurations with the same model name have independent health. Provider configuration and ordering are preserved. Embeddings, reranking and TTS are outside this conversation-model view.
+
+## Context clarification prompt
+
+Click **防误判提示词 (Context clarification prompt)** in the model status header to expand the editor. The editor starts collapsed and the prompt defaults to empty. Click **保存提示词 (Save prompt)** to save the shared text. Each provider's **注入提示词 (Inject prompt)** switch saves and applies immediately by `provider_id`. The database persists the text and switches independently of model health management.
+
+Giftia appends the text once to the original user prompt for each business request to a selected provider. Decision providers use the end of the textual `state`. Retries and fallbacks use the actual provider's selection. Native tool loops reuse the suffix in the initial user message. Connectivity tests use their own random challenge.
 
 ## Management switch and manual disabling
 
@@ -39,4 +45,4 @@ With management enabled and the provider not manually disabled, click **测试 (
 
 A strictly validated reply immediately clears failures and cooldown for every flow. Invalid output or an exception does not restore health and starts cooldown even for a previously available provider. This tests text generation, not multimodal capabilities or business XML formatting. Ordinary business output keeps its existing parsers and is not subject to the probe challenge rule.
 
-The visible page refreshes about every five seconds and has a manual refresh button. Automatic and manual tests are recorded under token usage type `provider_test`, with `manual_test` identifying the source. The page exposes classified failure reasons, not API keys or raw exceptions.
+The visible page refreshes automatically about every five seconds. Automatic and manual tests are recorded under token usage type `provider_test`, with `manual_test` identifying the source. The page exposes classified failure reasons, not API keys or raw exceptions.

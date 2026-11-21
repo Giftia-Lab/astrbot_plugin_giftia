@@ -39,6 +39,7 @@ from ..utils.notice_parse import (
     NoticeParser,
     NoticeParseResult,
 )
+from ..utils.reply_timing import ReplyTiming
 from ..utils.schemas import MessageData, XmlLlmResult
 from .action_dispatcher import ActionDispatcher
 from .decision_engine import DecisionEngine
@@ -803,7 +804,7 @@ class ChatManager:
                         )
                         if completed and task_snapshot == snapshot:
                             approved_snapshot = snapshot
-                            logger.info(
+                            logger.debug(
                                 "[Giftia] Shortened session wait for %s:%s: "
                                 "messages=%d, saved_wait=%.3fs",
                                 bot_name,
@@ -1032,6 +1033,7 @@ class ChatManager:
                         history = [
                             msg for msg in recent if msg.message_id not in batch_ids
                         ][-12:]
+                        timing = ReplyTiming()
                         (
                             should_reply,
                             memories,
@@ -1048,6 +1050,7 @@ class ChatManager:
                             recent_messages=history,
                             force_reply=any(item.force_reply for item in state.current),
                             review_context=review_context,
+                            timing=timing,
                         )
                         if not should_reply:
                             await self._set_batch_status(
@@ -1136,6 +1139,7 @@ class ChatManager:
                             meme_tags,
                             review_after_id=review_after_id,
                             review_context=review_context,
+                            timing=timing,
                         )
                         await self._set_batch_status(
                             bot_name,
@@ -1228,6 +1232,7 @@ class ChatManager:
         review_after_id: int | None = None,
         review_context: str = "",
         delegation_result: str = "",
+        timing: ReplyTiming | None = None,
     ) -> bool:
         """Generate and dispatch one frozen batch under the shared session lock.
 
@@ -1243,6 +1248,7 @@ class ChatManager:
             review_after_id: Input watermark, omitted after a rejected draft.
             review_context: Deferred arrivals that must still inform regeneration.
             delegation_result: Compact worker report claimed under the session lock.
+            timing: Timing carried forward from the batch decision.
 
         Returns:
             Whether the reply finished normally, including intentional silence.
@@ -1268,6 +1274,7 @@ class ChatManager:
                 meme_tags=meme_tags,
                 review_after_id=review_after_id,
                 other_data=[review_context] if review_context else None,
+                timing=timing,
                 **(
                     {"remind_message": delegation_result, "delegation_delivery": True}
                     if delegation_result
