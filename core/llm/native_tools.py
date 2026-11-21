@@ -128,7 +128,7 @@ class SearchMemoryTool(FunctionTool):
                 },
                 "user_id": {
                     "type": "string",
-                    "description": "可选目标用户 ID，只能缩小配置允许的召回范围；省略时按配置检索，用户隔离模式使用本批参与者。",
+                    "description": "可选目标用户 ID，只能缩小配置允许的召回范围。",
                 },
                 "start_date": {
                     "type": "string",
