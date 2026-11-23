@@ -51,6 +51,7 @@ def parser(tmp_path, monkeypatch):
     db = MagicMock()
     db.get_media_caption_by_hash = AsyncMock(return_value=None)
     db.get_media_caption_by_filename = AsyncMock(return_value=None)
+    db.find_media_ids = AsyncMock(return_value=[])
     db.insert_media_caption = AsyncMock()
     db.insert_message = AsyncMock()
     http = MagicMock()

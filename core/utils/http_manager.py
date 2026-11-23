@@ -23,8 +23,16 @@ class HttpManager:
         self.session = ClientSession(timeout=ClientTimeout(connect=30, total=60))
         self.config = config
 
-    async def download_media(self, url: str) -> bytes:
-        """下载媒体文件"""
+    async def download_media(self, url: str, *, max_bytes: int | None = None) -> bytes:
+        """Read the original media, optionally limiting the bytes downloaded.
+
+        Args:
+            url: Remote URL or an allowed local path.
+            max_bytes: Maximum accepted size, if supplied.
+
+        Returns:
+            Media bytes, or empty bytes if unavailable or oversized.
+        """
         if not url or not isinstance(url, str):
             return b""
 
@@ -35,7 +43,11 @@ class HttpManager:
                 logger.warning(f"[Giftia Security] 拦截不安全的媒体路径读取请求: {url}")
                 return b""
             try:
-                return safe_path.read_bytes()
+                if max_bytes is None:
+                    return safe_path.read_bytes()
+                with safe_path.open("rb") as file:
+                    content = file.read(max_bytes + 1)
+                return content if len(content) <= max_bytes else b""
             except Exception as e:
                 logger.error(f"从本地读取媒体文件失败: {e}, Path: {safe_path}")
                 return b""
@@ -67,7 +79,16 @@ class HttpManager:
             try:
                 async with self.session.get(url, headers=headers) as resp:
                     if resp.status == 200:
-                        return await resp.read()
+                        if max_bytes is None:
+                            return await resp.read()
+                        if resp.content_length and resp.content_length > max_bytes:
+                            return b""
+                        content = bytearray()
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            if len(content) + len(chunk) > max_bytes:
+                                return b""
+                            content.extend(chunk)
+                        return bytes(content)
 
                     # 识别 Cloudflare 人机验证挑战（5秒盾/Turnstile），优雅跳过缓存并避免重复重试刷屏
                     if resp.headers.get("Cf-Mitigated") == "challenge" or (

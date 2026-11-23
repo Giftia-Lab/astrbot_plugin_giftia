@@ -2,6 +2,7 @@ import asyncio
 import base64
 import copy
 import os
+from hashlib import sha256
 from pathlib import Path
 
 from astrbot.api import logger
@@ -10,7 +11,11 @@ from astrbot.api.message_components import Image, Reply
 from astrbot.core.star.star_tools import StarTools
 
 from ..utils.http_manager import HttpManager
-from ..utils.path_security import get_safe_local_media_path
+from ..utils.path_security import (
+    get_safe_local_media_path,
+    original_media_path,
+    save_media_cache_file,
+)
 from ..utils.schemas import MediaCaption, XmlLlmResult, extract_media_ids
 from ..utils.video_utils import (
     VIDEO_AUTO_COMPRESS_THRESHOLD_BYTES,
@@ -410,7 +415,8 @@ class MediaCaptioner:
 
         cache_dir = StarTools.get_data_dir("astrbot_plugin_giftia") / "media_cache"
         os.makedirs(cache_dir, exist_ok=True)
-        local_video_path = cache_dir / f"{media_caption.hash_val}.mp4"
+        local_video_path = original_media_path(cache_dir, media_caption.hash_val)
+        content_digest = media_caption.content_digest
 
         if not local_video_path.exists():
             if url.startswith("http://") or url.startswith("https://"):
@@ -420,7 +426,10 @@ class MediaCaptioner:
                 video_bytes = await self.plugin.http_manager.download_media(url)
                 if not video_bytes:
                     return "[视频下载失败]"
-                local_video_path.write_bytes(video_bytes)
+                if save_media_cache_file(local_video_path, video_bytes):
+                    content_digest = sha256(video_bytes).hexdigest()
+                elif not local_video_path.is_file():
+                    return "[视频缓存写入失败]"
             else:
                 safe_video_path = get_safe_local_media_path(url)
                 if safe_video_path:
@@ -490,6 +499,8 @@ class MediaCaptioner:
         # 3. 强抓原生视频全量字节包转 Base64 (data:video/mp4;base64,...)
         try:
             video_raw_bytes = Path(target_video_file).read_bytes()
+            if not content_digest and target_video_file == str(local_video_path):
+                content_digest = sha256(video_raw_bytes).hexdigest()
             video_b64_str = base64.b64encode(video_raw_bytes).decode("utf-8")
             # 4. 发送前严格校验：最终 Base64 编码数据量不得超过 20MB 网关上限
             if len(video_b64_str) > VIDEO_MAX_PAYLOAD_BYTES:
@@ -515,6 +526,7 @@ class MediaCaptioner:
                 media_caption.text = transcribed.text
                 media_caption.caption = caption_text
                 media_caption.is_captioned = True
+                media_caption.content_digest = content_digest
                 await self.plugin.data_cache.update_caption(media_caption)
                 return caption_text
         except Exception as e:

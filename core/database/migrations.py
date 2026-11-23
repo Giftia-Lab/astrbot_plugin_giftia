@@ -609,6 +609,27 @@ async def _migrate_to_v10(conn: aiosqlite.Connection) -> None:
     await _add_missing_columns(conn, "group_metadata", (("onebot_snapshot", "TEXT"),))
 
 
+MEDIA_IDENTITY_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_media_content_digest "
+    "ON media_caption (media_type, content_digest) WHERE content_digest IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_media_source_key "
+    "ON media_caption (media_type, source_key) WHERE source_key IS NOT NULL",
+)
+
+
+async def _migrate_to_v11(conn: aiosqlite.Connection) -> None:
+    """Store media identity evidence alongside existing media IDs.
+
+    Args:
+        conn: Database connection being initialized.
+    """
+    await _add_missing_columns(
+        conn, "media_caption", (("content_digest", "TEXT"), ("source_key", "TEXT"))
+    )
+    for statement in MEDIA_IDENTITY_INDEXES:
+        await conn.execute(statement)
+
+
 # Schema versions are independent of plugin releases; released steps stay frozen.
 MIGRATIONS = (
     (1, _migrate_legacy_to_v1),
@@ -621,6 +642,7 @@ MIGRATIONS = (
     (8, _migrate_to_v8),
     (9, _migrate_to_v9),
     (10, _migrate_to_v10),
+    (11, _migrate_to_v11),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

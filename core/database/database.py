@@ -327,6 +327,13 @@ class Database(ProfileStoreMixin):
     ) -> MediaCaption | None:
         return await self.media_captions_repo.get_media_caption_by_filename(file_name)
 
+    async def find_media_ids(
+        self, media_type: str, content_digest: str, source_key: str
+    ) -> list[str]:
+        return await self.media_captions_repo.find_media_ids(
+            media_type, content_digest, source_key
+        )
+
     async def update_media_caption(self, media_caption: MediaCaption):
         return await self.media_captions_repo.update_media_caption(media_caption)
 

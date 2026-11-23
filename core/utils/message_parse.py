@@ -438,6 +438,7 @@ class MessageParser:
                     defer_caption,
                     event=event,
                     path=getattr(comp, "path", None),
+                    file_id=self._video_file_id(comp, event if _depth == 0 else None),
                 )
                 result.merge(media_result)
                 msg_parts.append(part)
@@ -558,6 +559,7 @@ class MessageParser:
         defer_caption: bool,
         event: AstrMessageEvent | None = None,
         path: str | None = None,
+        file_id: str | int | None = None,
     ) -> tuple[str, ChainParseResult]:
         return await self.media_formatter.format_video_ref(
             url,
@@ -565,7 +567,42 @@ class MessageParser:
             defer_caption,
             event=event,
             path=path,
+            file_id=file_id,
         )
+
+    def _video_file_id(
+        self, video: Video, event: AstrMessageEvent | None
+    ) -> str | int | None:
+        """Recover an adapter file ID that the Video component may have dropped.
+
+        Args:
+            video: Parsed video component.
+            event: Event for the same message as the component, if available.
+
+        Returns:
+            The explicit file ID when it matches this video unambiguously.
+        """
+        file_id = getattr(video, "file_id", None)
+        if file_id:
+            return file_id
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        segments = self._get_event_field(raw, "message", [])
+        if not isinstance(segments, (list, tuple)) or not (video.file or video.url):
+            return None
+
+        matches = set()
+        for segment in segments:
+            if self._get_event_field(segment, "type") != "video":
+                continue
+            data = self._get_event_field(segment, "data", {})
+            if (self._get_event_field(data, "file") or "") != (video.file or ""):
+                continue
+            if (self._get_event_field(data, "url") or "") != (video.url or ""):
+                continue
+            file_id = self._get_event_field(data, "file_id")
+            if isinstance(file_id, (str, int)) and file_id:
+                matches.add(file_id)
+        return next(iter(matches)) if len(matches) == 1 else None
 
     async def _component_nodes_to_forward_result(
         self,

@@ -119,6 +119,8 @@ class MediaCaption:
     file_size: int = 0
     width: int = 0
     height: int = 0
+    content_digest: str = ""
+    source_key: str = ""
 
 
 @dataclass(repr=False, slots=True)

@@ -66,3 +66,26 @@ async def test_verified_download_succeeds_and_retries_transient_errors(
     assert manager.session.get.call_count == len(attempts)
     for call in manager.session.get.call_args_list:
         assert call.kwargs.get("ssl", True) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("limit", "expected"), [(3, b""), (4, b"abcd")])
+async def test_bounded_download_limits_streams_without_a_content_length(
+    manager, limit, expected
+):
+    async def chunks(_):
+        yield b"ab"
+        yield b"cd"
+
+    response = SimpleNamespace(
+        status=200, content_length=None, content=SimpleNamespace(iter_chunked=chunks)
+    )
+    request = MagicMock()
+    request.__aenter__ = AsyncMock(return_value=response)
+    manager.session.get.return_value = request
+
+    assert (
+        await manager.download_media("https://media.example/video", max_bytes=limit)
+        == expected
+    )
+    manager.session.get.assert_called_once()

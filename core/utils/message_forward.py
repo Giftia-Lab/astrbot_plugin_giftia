@@ -567,7 +567,11 @@ class MessageForwardParser:
                 file_name = seg_data.get("file") or seg_data.get("path") or ""
                 if self.format_video_ref:
                     part, media_result = await self.format_video_ref(
-                        str(url or ""), str(file_name or ""), defer_caption, event=event
+                        str(url or ""),
+                        str(file_name or ""),
+                        defer_caption,
+                        event=event,
+                        file_id=seg_data.get("file_id"),
                     )
                     result.merge(media_result)
                     parts.append(part)
