@@ -116,32 +116,48 @@ def _scan_media_info_dict(data: dict) -> tuple[int, float, str]:
     return f_size, dur, found_url
 
 
-def _parse_cq_code_video(raw_str: str) -> tuple[int, float, str]:
-    """从 OneBot CQ 码字符串提取 [CQ:video,...] 参数"""
-    f_size = 0
-    dur = 0.0
-    url = ""
-    if not raw_str or "[CQ:video" not in raw_str:
-        return f_size, dur, url
+def _video_message_info(
+    raw_message, url: str, file_name: str
+) -> tuple[int, float, str]:
+    """Read metadata only from an unambiguously matching video segment.
 
-    match = re.search(r"\[CQ:video,([^\]]+)\]", raw_str)
-    if match:
-        params_str = match.group(1)
-        params = dict(re.findall(r"([a-zA-Z0-9_]+)=([^,\s\]]+)", params_str))
-        if "url" in params and (
-            params["url"].startswith("http") or params["url"].startswith("file")
-        ):
-            url = params["url"]
-        if "file_size" in params and params["file_size"].isdigit():
-            f_size = int(params["file_size"])
-        elif "size" in params and params["size"].isdigit():
-            f_size = int(params["size"])
-        if "duration" in params:
-            try:
-                dur = float(params["duration"])
-            except ValueError:
-                pass
-    return f_size, dur, url
+    Args:
+        raw_message: Original message or OneBot event for the current chain.
+        url: URL of the video being ingested.
+        file_name: Platform file ID or file reference.
+
+    Returns:
+        The matched video's size, duration, and URL, or unknown values.
+    """
+    if isinstance(raw_message, str):
+        data_items = [
+            dict(re.findall(r"([a-zA-Z0-9_]+)=([^,\s\]]+)", match))
+            for match in re.findall(r"\[CQ:video,([^\]]+)\]", raw_message)
+        ]
+    else:
+        if isinstance(raw_message, dict):
+            segments = raw_message.get("message", [])
+        else:
+            segments = getattr(raw_message, "message", [])
+        if not isinstance(segments, list):
+            return 0, 0.0, ""
+        data_items = [
+            segment["data"]
+            for segment in segments
+            if isinstance(segment, dict)
+            and segment.get("type") == "video"
+            and isinstance(segment.get("data"), dict)
+        ]
+
+    matches = []
+    for data in data_items:
+        segment_url = data.get("url") or data.get("file_url") or data.get("src")
+        file_id = str(data.get("file_id") or "")
+        if (file_name and file_name == file_id) or (url and url == segment_url):
+            matches.append(data)
+        elif file_name and file_name == data.get("file") and not (url and segment_url):
+            matches.append(data)
+    return _scan_media_info_dict(matches[0]) if len(matches) == 1 else (0, 0.0, "")
 
 
 async def _fetch_onebot_file_api(event, file_id: str) -> tuple[str, int, float]:
@@ -195,9 +211,16 @@ async def _fetch_http_video_size(url: str) -> tuple[int, float]:
             # 1. 尝试 HEAD 请求
             try:
                 async with session.head(
-                    url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=4)
+                    url,
+                    headers={"Accept-Encoding": "identity"},
+                    allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=4),
                 ) as resp:
-                    if resp.status == 200:
+                    if (
+                        resp.status == 200
+                        and resp.headers.get("Content-Encoding", "identity").lower()
+                        == "identity"
+                    ):
                         cl = resp.headers.get("Content-Length")
                         if cl and cl.isdigit():
                             file_size = int(cl)
@@ -206,14 +229,18 @@ async def _fetch_http_video_size(url: str) -> tuple[int, float]:
 
             # 2. 如果 HEAD 拿不到 Content-Length，发送 Range: bytes=0-0
             if not file_size:
-                headers = {"Range": "bytes=0-0"}
+                headers = {"Range": "bytes=0-0", "Accept-Encoding": "identity"}
                 async with session.get(
                     url,
                     headers=headers,
                     allow_redirects=True,
                     timeout=aiohttp.ClientTimeout(total=4),
                 ) as resp:
-                    if resp.status in (200, 206):
+                    if (
+                        resp.status in (200, 206)
+                        and resp.headers.get("Content-Encoding", "identity").lower()
+                        == "identity"
+                    ):
                         cr = resp.headers.get("Content-Range")
                         if cr and "/" in cr:
                             total_str = cr.split("/")[-1].strip()
@@ -325,35 +352,23 @@ async def get_remote_video_info(
             api_url, api_size, api_dur = await _fetch_onebot_file_api(
                 event, file_id_candidate
             )
-            if api_size:
+            if api_size and not file_size:
                 file_size = api_size
             if api_dur:
                 duration = api_dur
             if api_url and api_url not in candidates:
                 candidates.append(api_url)
 
-    # 3. 深度从 raw_message / CQ 码提取
+    # 3. Use only raw metadata that belongs to the selected video.
     if event and hasattr(event, "message_obj") and event.message_obj:
         raw_msg = getattr(event.message_obj, "raw_message", None)
-        if raw_msg:
-            # CQ 码解析
-            if isinstance(raw_msg, str):
-                cq_size, cq_dur, cq_url = _parse_cq_code_video(raw_msg)
-                if not file_size and cq_size:
-                    file_size = cq_size
-                if not duration and cq_dur:
-                    duration = cq_dur
-                if cq_url and cq_url not in candidates:
-                    candidates.append(cq_url)
-            # 字典格式解析
-            elif isinstance(raw_msg, dict):
-                raw_size, raw_dur, raw_url = _scan_media_info_dict(raw_msg)
-                if not file_size and raw_size:
-                    file_size = raw_size
-                if not duration and raw_dur:
-                    duration = raw_dur
-                if raw_url and raw_url not in candidates:
-                    candidates.append(raw_url)
+        raw_size, raw_dur, raw_url = _video_message_info(
+            raw_msg, url or "", file_name or ""
+        )
+        file_size = file_size or raw_size
+        duration = duration or raw_dur
+        if raw_url and raw_url not in candidates:
+            candidates.append(raw_url)
 
     # 4. 通过 HTTP HEAD/Range 请求获取文件大小
     target_http_url = ""

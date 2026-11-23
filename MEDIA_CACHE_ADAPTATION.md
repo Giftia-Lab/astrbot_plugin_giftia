@@ -10,8 +10,8 @@
 
 为了保障拟人化聊天、记忆沉淀与多模态转述的稳定性，Giftia 插件内部实现了一套独立的**持久化媒体缓存与哈希索引机制**：
 
-1. **自动持久化缓存**：所有经过消息管线的媒体文件（图片、音频、视频）都会被下载并持久化保存至 Giftia 专属的数据目录下。
-2. **唯一哈希索引**：为每个媒体生成 16 位十六进制的稳定哈希 ID（例如 `a1b2c3d4e5f67890`，基于 xxHash3 算法截取前 16 位）。
+1. **自动持久化缓存**：已下载的原始媒体可保存至 Giftia 专属的数据目录。视频通常在按需转述时下载。
+2. **媒体 ID**：Giftia 使用 16 字符的十六进制 ID（例如 `a1b2c3d4e5f67890`）。确认撞键时会给新媒体另分配一个 ID。适配方应读取消息占位符中的 ID。
 3. **上下文占位符替换**：Bot 在对话上下文中看到的媒体消息均被规范化为 `[图片:哈希ID]`、`[语音:哈希ID]` 或 `[视频:哈希ID]` 格式。
 
 ---
@@ -54,8 +54,8 @@ import tempfile
 from pathlib import Path
 from astrbot.core.star.star_tools import StarTools
 
-# 匹配 16 位哈希或占位符（正则支持 16~64 位 Hex 以向前兼容平台 MD5/SHA256 文件名，索引时截取前 16 位）
-HASH_PATTERN = re.compile(r"(?:\[(?:图片|语音|视频):)?([a-fA-F0-9]{16,64})\]?")
+# 匹配 Giftia 分配的 16 字符 ID 或包含该 ID 的媒体占位符
+HASH_PATTERN = re.compile(r"(?:\[(?:图片|语音|视频):([a-fA-F0-9]{16})\]|([a-fA-F0-9]{16}))")
 
 def resolve_media_to_path(media_input: str) -> Path | str | None:
     """
@@ -94,10 +94,10 @@ def resolve_media_to_path(media_input: str) -> Path | str | None:
         except Exception:
             pass
 
-    # 3. 检查是否为 Giftia 媒体哈希 ID（Giftia 标准哈希为 16 位，截取前 16 位检索缓存）
-    match = HASH_PATTERN.search(media_input)
+    # 3. 使用 Giftia 分配的完整 ID 查找媒体缓存
+    match = HASH_PATTERN.fullmatch(media_input.strip())
     if match:
-        hash_val = match.group(1).lower()[:16]
+        hash_val = (match.group(1) or match.group(2)).lower()
         giftia_cache_file = StarTools.get_data_dir("astrbot_plugin_giftia") / "media_cache" / hash_val
         if giftia_cache_file.exists():
             return giftia_cache_file

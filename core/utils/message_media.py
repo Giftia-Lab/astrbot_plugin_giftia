@@ -6,6 +6,10 @@ import re
 import time
 import urllib.parse
 from collections import deque
+from dataclasses import replace
+from hashlib import sha256
+from itertools import chain, count
+from pathlib import Path
 from typing import Any
 
 from xxhash import xxh3_64_hexdigest
@@ -17,10 +21,10 @@ from astrbot.core.star.star_tools import StarTools
 
 from ..database.data_cache import DataCache, is_temp_or_local_path
 from ..llm.call_llm import CallLLM
-from .event_utils import resolve_bot_name
+from .event_utils import get_adapter_id, resolve_bot_name
 from .http_manager import HttpManager
 from .message_parse_types import ChainParseResult
-from .path_security import get_safe_local_media_path
+from .path_security import original_media_path, save_media_cache_file
 from .schemas import IMAGE_METADATA_PATTERN, MediaCaption
 from .video_utils import format_duration, format_file_size, get_remote_video_info
 
@@ -36,6 +40,7 @@ SUPPORTED_FILE_FORMATS_WITH_DOT = (
     ".heif",
     ".mpo",
 )
+VIDEO_AUTH_QUERY_PARAMS = frozenset({"rkey", "token"})
 
 
 class SessionCaptionRateLimiter:
@@ -141,73 +146,239 @@ class MessageMediaFormatter:
         return bool(hash_val and re.fullmatch(r"[a-fA-F0-9]{16,64}", str(hash_val)))
 
     @staticmethod
-    def get_stable_hash(file_name: str | None, url: str | None) -> str:
-        """
-        获取稳定的 16 位媒体哈希值。
-        1. 优先提取 16~64 位 Hex 文件名标识。
-        2. 如果为网络 URL，自动剥离 ?rkey=.../token 等动态 Query 鉴权参数，确保相同视频哈希完全一致。
-        """
-        for cand in (file_name, url):
-            if not cand or not isinstance(cand, str):
+    def _legacy_video_hash(file_name: str | None, url: str) -> str:
+        for reference in (file_name, url):
+            if not reference or is_temp_or_local_path(reference):
                 continue
-            cand_str = cand.strip()
-            if is_temp_or_local_path(cand_str):
-                continue
-
-            clean_path = (
-                urllib.parse.urlparse(cand_str).path
-                if cand_str.startswith("http")
-                else cand_str
+            path = (
+                urllib.parse.urlparse(reference).path
+                if reference.startswith("http")
+                else reference
             )
-            basename = os.path.basename(clean_path)
-            stem = re.sub(r"\.[^.]+$", "", basename)
+            stem = Path(path).stem
             if re.fullmatch(r"[a-fA-F0-9]{16,64}", stem):
                 return stem.lower()[:16]
+        if url.startswith(("http://", "https://")):
+            parsed = urllib.parse.urlparse(url)
+            url = parsed.netloc + parsed.path
+        return xxh3_64_hexdigest((url or file_name or "").encode())
 
-        target_str = url or file_name or ""
-        if target_str.startswith("http://") or target_str.startswith("https://"):
-            try:
-                parsed = urllib.parse.urlparse(target_str)
-                target_str = parsed.netloc + parsed.path
-            except Exception:
-                pass
-
-        return xxh3_64_hexdigest(target_str.encode("utf-8"))[:16]
-
-    async def _update_existing_media_caption(
-        self,
-        existing_caption: MediaCaption,
-        url: str | None = None,
-        file_name: str | None = None,
-        duration: float = 0.0,
-        file_size: int = 0,
-        width: int = 0,
-        height: int = 0,
-    ) -> None:
-        """Refresh media references and fill missing physical metadata.
+    @staticmethod
+    def _video_reference(
+        file_name: str | None,
+        url: str,
+        file_id: str | int | None = None,
+        adapter_id: str = "",
+    ) -> str:
+        """Resolve a full platform ID or a URL retaining resource selectors.
 
         Args:
-            existing_caption: Cached media record to update and persist.
-            url: Most recent media URL, when available.
-            file_name: Most recent platform file reference, when available.
-            duration: Known duration in seconds, or zero when unavailable.
-            file_size: Known file size in bytes, or zero when unavailable.
-            width: Known pixel width, or zero when unavailable.
-            height: Known pixel height, or zero when unavailable.
+            file_name: Platform file reference or display name.
+            url: Video URL or local path.
+            file_id: Explicit ID supplied by the adapter.
+            adapter_id: Scope for opaque platform IDs.
+
+        Returns:
+            Full source reference for video deduplication.
         """
-        if url:
-            existing_caption.url = url
-        if file_name:
-            existing_caption.file_name = file_name
-        if duration > 0 and getattr(existing_caption, "duration", 0) <= 0:
-            existing_caption.duration = duration
-        if file_size > 0 and getattr(existing_caption, "file_size", 0) <= 0:
-            existing_caption.file_size = file_size
-        if width > 0 and existing_caption.width <= 0:
-            existing_caption.width = width
-        if height > 0 and existing_caption.height <= 0:
-            existing_caption.height = height
-        await self.data_cache.set_caption(existing_caption)
+        if isinstance(file_id, (str, int)) and str(file_id).strip():
+            return f"file:{len(adapter_id)}:{adapter_id}:{str(file_id).strip()}"
+        if file_name and not is_temp_or_local_path(file_name):
+            match = re.fullmatch(r"([a-fA-F0-9]{16,64})(?:\.[a-zA-Z0-9]+)?", file_name)
+            if match:
+                return f"file:0::{match[1].lower()}"
+        if url.startswith(("http://", "https://")):
+            parsed = urllib.parse.urlsplit(url)
+            query = "&".join(
+                parameter
+                for parameter in parsed.query.split("&")
+                if urllib.parse.unquote_plus(parameter.partition("=")[0]).lower()
+                not in VIDEO_AUTH_QUERY_PARAMS
+            )
+            return urllib.parse.urlunsplit(parsed._replace(query=query, fragment=""))
+        return url or file_name or ""
+
+    @staticmethod
+    def _refresh_caption(
+        existing: MediaCaption, incoming: MediaCaption
+    ) -> MediaCaption:
+        return replace(
+            existing,
+            url=incoming.url or existing.url,
+            file_name=incoming.file_name or existing.file_name,
+            duration=existing.duration or incoming.duration,
+            file_size=incoming.file_size or existing.file_size,
+            width=existing.width or incoming.width,
+            height=existing.height or incoming.height,
+            content_digest=incoming.content_digest or existing.content_digest,
+            source_key=incoming.source_key or existing.source_key,
+        )
+
+    @contextlib.asynccontextmanager
+    async def _media_slot(
+        self,
+        incoming: MediaCaption,
+        content: bytes | None,
+        *,
+        legacy_id: str = "",
+        video_limit: int = 0,
+    ):
+        """Reserve a matching short ID through the caller's database write.
+
+        Args:
+            incoming: Media metadata with the candidate ID and identity evidence.
+            content: Original bytes, or None if a video can be fetched on demand.
+            legacy_id: Pre-upgrade video key used only with a matching full reference.
+            video_limit: Maximum bytes to download for a video comparison.
+
+        Yields:
+            The matching previous record, if any. The draft receives the final ID.
+        """
+        base_id = incoming.hash_val
+        is_video = incoming.media_type == "video"
+        identity = (
+            incoming.source_key
+            if is_video
+            else (incoming.content_digest or incoming.source_key)
+        )
+        cache_dir = StarTools.get_data_dir("astrbot_plugin_giftia") / "media_cache"
+        async with self.hash_locks.lock(f"{incoming.media_type}:{identity or base_id}"):
+            known_ids = await self.data_cache.db.find_media_ids(
+                incoming.media_type,
+                "" if is_video else incoming.content_digest,
+                incoming.source_key,
+            )
+            existing_ids = set(known_ids)
+            if legacy_id:
+                existing_ids.add(legacy_id)
+            candidates = chain(
+                dict.fromkeys(filter(None, (*known_ids, legacy_id, base_id))),
+                (
+                    sha256(f"giftia-media:{base_id}:{attempt}".encode()).hexdigest()[
+                        :16
+                    ]
+                    for attempt in count(1)
+                ),
+            )
+            for candidate in candidates:
+                async with self.hash_locks.lock(candidate):
+                    existing = await self.data_cache.get_caption_by_hash(candidate)
+                    if (
+                        existing is None
+                        and candidate in existing_ids
+                        and candidate != base_id
+                    ):
+                        continue
+                    if existing and existing.media_type != incoming.media_type:
+                        continue
+
+                    cached = original_media_path(cache_dir, candidate)
+                    try:
+                        cached_size = (
+                            cached.stat().st_size if cached.is_file() else None
+                        )
+                    except OSError:
+                        cached_size = None
+                    old_size = (
+                        cached_size
+                        if cached_size is not None
+                        else (existing.file_size if existing else 0)
+                    )
+                    if (
+                        old_size > 0
+                        and incoming.file_size > 0
+                        and old_size != incoming.file_size
+                    ):
+                        continue
+
+                    previous_source = existing.source_key if existing else ""
+                    if existing and not previous_source and incoming.source_key:
+                        reference = existing.url or ""
+                        if is_video:
+                            reference = self._video_reference(
+                                existing.file_name, reference
+                            )
+                        if reference:
+                            previous_source = sha256(reference.encode()).hexdigest()
+                    source_differs = bool(
+                        previous_source and incoming.source_key != previous_source
+                    )
+                    if is_video and source_differs:
+                        continue
+
+                    if (
+                        content is None
+                        and incoming.url
+                        and video_limit > 0
+                        and incoming.file_size <= video_limit
+                        and (
+                            cached_size is not None
+                            or (existing and existing.content_digest)
+                        )
+                    ):
+                        content = await self.http_manager.download_media(
+                            incoming.url, max_bytes=video_limit
+                        )
+                        if content:
+                            incoming.file_size = len(content)
+                            incoming.content_digest = sha256(content).hexdigest()
+                            if old_size > 0 and old_size != incoming.file_size:
+                                continue
+
+                    bytes_match = False
+                    if content and cached_size is not None:
+                        try:
+                            bytes_match = (
+                                await asyncio.to_thread(cached.read_bytes) == content
+                            )
+                        except OSError:
+                            cached_size = None
+                        else:
+                            if not bytes_match:
+                                continue
+                    old_digest = existing.content_digest if existing else ""
+                    if old_digest and incoming.content_digest:
+                        if old_digest != incoming.content_digest:
+                            continue
+                    elif source_differs and not bytes_match:
+                        continue
+                    if not existing and cached_size is not None and not bytes_match:
+                        continue
+                    if (
+                        existing
+                        and candidate == legacy_id
+                        and not previous_source
+                        and not bytes_match
+                        and not (old_digest and old_digest == incoming.content_digest)
+                    ):
+                        continue
+
+                    if content and cached_size is None:
+                        path = cache_dir / candidate
+                        saved = save_media_cache_file(path, content)
+                        if not saved and path.is_file():
+                            try:
+                                if await asyncio.to_thread(path.read_bytes) != content:
+                                    continue
+                            except FileNotFoundError:
+                                pass
+                    incoming.hash_val = candidate
+                    yield existing
+                    return
+
+    async def _caption_from_filename(
+        self, file_name: str | None, media_type: str
+    ) -> MediaCaption | None:
+        if not file_name or is_temp_or_local_path(file_name):
+            return None
+        _, caption = await self.data_cache.get_caption_by_filename(file_name)
+        if not caption and media_type == "image":
+            legacy_id = self.filename_stable_hash(file_name)
+            if legacy_id:
+                legacy = await self.data_cache.get_caption_by_hash(legacy_id)
+                if legacy and legacy.file_name == file_name:
+                    caption = legacy
+        return caption if caption and caption.media_type == media_type else None
 
     async def format_image_ref(
         self,
@@ -222,47 +393,23 @@ class MessageMediaFormatter:
         if decision_url:
             result.image_urls.append(decision_url)
 
-        media_caption = None
-        hash_val = None
-        legacy_caption = None
-        if file_name and not is_temp_or_local_path(file_name):
-            hash_val, media_caption = await self.data_cache.get_caption_by_filename(
-                file_name
-            )
-            if self.is_filename_stable_hash(hash_val):
-                legacy_caption = media_caption
-                media_caption = None
-
-        should_try_caption = bool(
-            url
-            or (
-                file_name
-                and (
-                    file_name.startswith("http")
-                    or file_name.startswith("file://")
-                    or file_name.startswith("base64://")
-                )
-            )
-        )
+        if not url and not file_name:
+            return "[图片]", result
         # Resolve bot_name and group_or_user_id from event
         bot_name = ""
         group_or_user_id = ""
-        if event and self.call_llm.plugin:
+        if event and getattr(self.call_llm, "plugin", None):
             bot_name = resolve_bot_name(self.call_llm.plugin, event)
             group_or_user_id = event.get_group_id() or event.get_sender_id() or ""
 
-        if not media_caption and should_try_caption:
-            hash_val, media_caption = await self.get_image_caption(
-                url or "",
-                file_name,
-                defer_caption,
-                custom_desc=custom_desc,
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-            )
-        if hash_val and media_caption:
-            await self.data_cache.set_caption(media_caption)
-        media_caption = media_caption or legacy_caption
+        hash_val, media_caption = await self.get_image_caption(
+            url,
+            file_name,
+            defer_caption,
+            custom_desc=custom_desc,
+            bot_name=bot_name,
+            group_or_user_id=group_or_user_id,
+        )
         if not hash_val or not media_caption:
             return "[图片]", result
 
@@ -285,47 +432,24 @@ class MessageMediaFormatter:
         if decision_url:
             result.audio_urls.append(decision_url)
 
-        media_caption = None
-        hash_val = None
-        if (
-            file_name
-            and self.audio_caption_enabled
-            and not is_temp_or_local_path(file_name)
-        ):
-            hash_val, media_caption = await self.data_cache.get_caption_by_filename(
-                file_name
-            )
-
-        should_try_caption = bool(
-            self.audio_caption_enabled
-            and (
-                url
-                or (
-                    file_name
-                    and (
-                        file_name.startswith("http") or file_name.startswith("file://")
-                    )
-                )
-            )
-        )
+        if not self.audio_caption_enabled or not (url or file_name):
+            return "[语音]", result
         # Resolve bot_name and group_or_user_id from event
         bot_name = ""
         group_or_user_id = ""
-        if event and self.call_llm.plugin:
+        if event and getattr(self.call_llm, "plugin", None):
             bot_name = resolve_bot_name(self.call_llm.plugin, event)
             group_or_user_id = event.get_group_id() or event.get_sender_id() or ""
 
-        if not media_caption and should_try_caption:
-            hash_val, media_caption = await self.get_audio_caption(
-                url or "",
-                file_name,
-                defer_caption,
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
-            )
+        hash_val, media_caption = await self.get_audio_caption(
+            url,
+            file_name,
+            defer_caption,
+            bot_name=bot_name,
+            group_or_user_id=group_or_user_id,
+        )
         if hash_val and media_caption:
             result.media_id_list.append(hash_val)
-            await self.data_cache.set_caption(media_caption)
             return f"[语音:{hash_val}]", result
         return "[语音]", result
 
@@ -336,14 +460,16 @@ class MessageMediaFormatter:
         defer_caption: bool,
         event=None,
         path: str | None = None,
+        file_id: str | int | None = None,
     ) -> tuple[str, ChainParseResult]:
         result = ChainParseResult()
         decision_url = self.first_media_url(url, file_name)
+        source = decision_url or url or path or ""
 
         # 1. 尝试多维获取远程/本地视频元数据 (file_size, duration)
         file_size, duration = await get_remote_video_info(
             url=decision_url or url or "",
-            file_name=file_name or "",
+            file_name=str(file_id or file_name or ""),
             path=path or "",
             event=event,
         )
@@ -358,67 +484,56 @@ class MessageMediaFormatter:
         max_size_mb = caption_config.get("video_max_file_size_mb", 50)
         max_size_bytes = max_size_mb * 1024 * 1024
 
-        # 3. 计算 16 位稳定哈希
-        hash_val = self.get_stable_hash(file_name, decision_url or url or path or "")
-
-        size_str = format_file_size(file_size)
-        dur_str = format_duration(duration)
-
-        # 4. 检查大小超限
-        is_over_limit = (file_size > 0) and (file_size > max_size_bytes)
-
-        existing_caption = (
-            await self.data_cache.get_caption_by_hash(hash_val) if hash_val else None
+        reference = self._video_reference(
+            file_name, source, file_id, get_adapter_id(event)
         )
-        if existing_caption:
-            await self._update_existing_media_caption(
-                existing_caption,
-                url=decision_url or url or "",
-                file_name=file_name,
-                duration=duration,
-                file_size=file_size,
+        if not reference:
+            return "[视频]", result
+        legacy_id = self._legacy_video_hash(file_name, source)
+        content = None
+        source = source or file_name or ""
+        local_source = source if is_temp_or_local_path(source) else path
+        if is_temp_or_local_path(local_source) and file_size <= max_size_bytes:
+            content = await self.http_manager.download_media(
+                local_source, max_bytes=max_size_bytes
             )
-
-        if is_over_limit:
-            tag = f"[视频:{hash_val}][文件过大:{size_str}]"
-            if not existing_caption:
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    file_name=file_name or "",
-                    url=decision_url or url or "",
-                    media_type="video",
-                    duration=duration,
-                    file_size=file_size,
-                    is_captioned=True,
-                    text=f"[视频体积过大已限制转述: {size_str}]",
-                    caption=f"[视频体积过大已限制转述: {size_str}]",
-                )
-                await self.data_cache.set_caption(media_caption)
-            result.media_id_list.append(hash_val)
-            return tag, result
-
-        # 5. 未超限逻辑：构建灵活、防御性的 Tag
-        if dur_str and size_str:
-            tag = f"[视频:{hash_val}][时长:{dur_str}, 大小:{size_str}]"
-        elif size_str:
-            tag = f"[视频:{hash_val}][大小:{size_str}]"
-        elif dur_str:
-            tag = f"[视频:{hash_val}][时长:{dur_str}]"
-        else:
-            tag = f"[视频:{hash_val}]"
-
-        if not existing_caption:
-            media_caption = MediaCaption(
-                hash_val=hash_val,
-                file_name=file_name or "",
-                url=decision_url or url or "",
-                media_type="video",
-                duration=duration,
-                file_size=file_size,
-                is_captioned=False,
-            )
+        incoming = MediaCaption(
+            hash_val=xxh3_64_hexdigest(reference.encode()),
+            file_name=file_name or "",
+            url=source,
+            media_type="video",
+            duration=duration,
+            file_size=len(content) if content else file_size,
+            content_digest=sha256(content).hexdigest() if content else "",
+            source_key=sha256(reference.encode()).hexdigest(),
+            is_captioned=False,
+        )
+        async with self._media_slot(
+            incoming, content, legacy_id=legacy_id, video_limit=max_size_bytes
+        ) as existing:
+            size_str = format_file_size(incoming.file_size)
+            dur_str = format_duration(duration)
+            tag = f"[视频:{incoming.hash_val}]"
+            if existing:
+                media_caption = self._refresh_caption(existing, incoming)
+            else:
+                media_caption = incoming
+            if incoming.file_size > max_size_bytes:
+                tag += f"[文件过大:{size_str}]"
+                if not existing:
+                    media_caption.is_captioned = True
+                    media_caption.text = media_caption.caption = (
+                        f"[视频体积过大已限制转述: {size_str}]"
+                    )
+            elif dur_str and size_str:
+                tag += f"[时长:{dur_str}, 大小:{size_str}]"
+            elif size_str:
+                tag += f"[大小:{size_str}]"
+            elif dur_str:
+                tag += f"[时长:{dur_str}]"
             await self.data_cache.set_caption(media_caption)
-        result.media_id_list.append(hash_val)
+
+        result.media_id_list.append(incoming.hash_val)
         return tag, result
 
     async def get_image_caption(
@@ -430,255 +545,142 @@ class MessageMediaFormatter:
         bot_name: str = "",
         group_or_user_id: str = "",
     ) -> tuple[str | None, MediaCaption | None]:
-        """获取图片描述"""
-        if not url and file_name:
-            url = file_name
-        async with self.url_locks.lock(url):
-            legacy_hash = self.filename_stable_hash(file_name)
-            legacy_caption = None
-            if file_name and not is_temp_or_local_path(file_name):
-                # 检查缓存
-                hash_val, media_caption = await self.data_cache.get_caption_by_filename(
-                    file_name
-                )
-                if (
-                    hash_val
-                    and media_caption
-                    and not self.is_filename_stable_hash(hash_val)
-                ):
-                    if getattr(media_caption, "is_captioned", True) or defer_caption:
-                        return hash_val, media_caption
-                if hash_val and media_caption:
-                    legacy_caption = media_caption
+        """Get or generate an image caption using the confirmed media identity.
 
-            if legacy_hash and not legacy_caption:
-                legacy_caption = await self.data_cache.get_caption_by_hash(legacy_hash)
+        Args:
+            url: Image source URL.
+            file_name: Platform file reference, local path, or base64 payload.
+            defer_caption: Store the image for later captioning.
+            custom_desc: Supplied description to store on the matching image.
+            bot_name: Bot requesting the caption.
+            group_or_user_id: Conversation requesting the caption.
 
-            # 下载图片
-            image_bytes = None
-            if file_name and (
-                file_name.startswith("file://") or is_temp_or_local_path(file_name)
-            ):
-                safe_local_path = get_safe_local_media_path(file_name)
-                if safe_local_path:
-                    try:
-                        image_bytes = safe_local_path.read_bytes()
-                    except Exception as e:
-                        file_name_disp = (
-                            (file_name[:100] + "...")
-                            if file_name and len(file_name) > 100
-                            else file_name
-                        )
-                        logger.error(f"[Giftia] 读取本地图片失败 {file_name_disp}: {e}")
-            elif file_name and file_name.startswith("base64://"):
+        Returns:
+            The resolved media ID and caption, or two empty values.
+        """
+        source = url or file_name or ""
+        async with self.url_locks.lock(source):
+            content = b""
+            file_reference = file_name or source
+            if is_temp_or_local_path(file_reference):
+                content = await self.http_manager.download_media(file_reference)
+            elif file_reference.startswith("base64://"):
+                payload = file_reference[9:].split(",", 1)[-1]
                 try:
-                    b64_data = file_name[9:]
-                    if "," in b64_data:
-                        b64_data = b64_data.split(",", 1)[1]
-                    image_bytes = b64_module.b64decode(b64_data)
-                except Exception as e:
-                    logger.error(f"[Giftia] 解码 base64 图片失败: {e}")
+                    content = b64_module.b64decode(payload)
+                except ValueError as error:
+                    logger.error(f"[Giftia] Could not decode base64 image: {error}")
+            if not content and source != file_reference:
+                content = await self.http_manager.download_media(source)
+            elif not content and self.first_media_url(source, None):
+                content = await self.http_manager.download_media(source)
 
-            if not image_bytes:
-                image_bytes = await self.http_manager.download_media(url)
-
-            if not image_bytes:
-                if legacy_hash and legacy_caption:
-                    return legacy_hash, legacy_caption
+            if not content:
+                legacy = await self._caption_from_filename(file_name, "image")
+                if legacy and (not url or not legacy.url or url == legacy.url):
+                    return legacy.hash_val, legacy
                 return None, None
-            # 新的 canonical media_id 一律使用图片内容哈希；文件名里的 32 位 MD5 只做旧缓存别名。
-            hash_val = xxh3_64_hexdigest(image_bytes)
-            width, height, file_size = await asyncio.to_thread(
-                HttpManager.get_image_metadata, image_bytes
-            )
 
-            # If the URL/file_name is a base64 string, replace it with a clean placeholder to avoid bloated DB columns
-            db_url = url
-            if db_url and db_url.startswith("base64://"):
-                db_url = f"base64://{hash_val}"
+        base_id = xxh3_64_hexdigest(content)
+        width, height, file_size = await asyncio.to_thread(
+            HttpManager.get_image_metadata, content
+        )
+        incoming = MediaCaption(
+            hash_val=base_id,
+            url=source,
+            file_name=file_name or "",
+            media_type="image",
+            width=width,
+            height=height,
+            file_size=file_size,
+            content_digest=sha256(content).hexdigest(),
+            is_captioned=False,
+        )
+        async with self._media_slot(incoming, content) as existing:
+            if incoming.url.startswith("base64://"):
+                incoming.url = f"base64://{incoming.hash_val}"
+            if incoming.file_name.startswith("base64://"):
+                incoming.file_name = f"base64://{incoming.hash_val}"
 
-            db_file_name = file_name
-            if db_file_name and db_file_name.startswith("base64://"):
-                db_file_name = f"base64://{hash_val}"
+            if existing:
+                incoming = self._refresh_caption(existing, incoming)
+            elif not custom_desc and incoming.hash_val == base_id:
+                legacy = await self._caption_from_filename(file_name, "image")
+                if legacy and await self._matches_legacy_image(
+                    legacy, incoming, content
+                ):
+                    incoming = self._refresh_caption(legacy, incoming)
+                    incoming.hash_val = base_id
 
-            # 保存到本地持久缓存目录，以便网页端可以永久预览
-            try:
-                from astrbot.core.star.star_tools import StarTools
-
-                cache_dir = (
-                    StarTools.get_data_dir("astrbot_plugin_giftia") / "media_cache"
-                )
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                cache_file = cache_dir / hash_val
-                if not cache_file.exists():
-                    cache_file.write_bytes(image_bytes)
-            except Exception as e:
-                logger.error(f"[Giftia] 保存媒体缓存失败: {e}")
-
-        async with self.hash_locks.lock(hash_val):
             if custom_desc:
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=db_url,
-                    media_type="image",
-                    caption=custom_desc,
-                    genre="表情包",
-                    is_captioned=True,
-                    width=width,
-                    height=height,
-                    file_size=file_size,
+                incoming = replace(
+                    incoming, caption=custom_desc, genre="表情包", is_captioned=True
                 )
-                if file_name:
-                    media_caption.file_name = db_file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
-
-            # 检查缓存
-            media_caption = await self.data_cache.get_caption_by_hash(hash_val)
-            if media_caption:
-                await self._update_existing_media_caption(
-                    media_caption,
-                    url=db_url,
-                    file_name=db_file_name if file_name else None,
-                    width=width,
-                    height=height,
-                    file_size=file_size,
+            elif not self.image_caption_enabled:
+                incoming.is_captioned = True
+            elif not incoming.is_captioned and not defer_caption:
+                session_key = (
+                    f"{bot_name}:{group_or_user_id}"
+                    if bot_name or group_or_user_id
+                    else ""
                 )
-                if getattr(media_caption, "is_captioned", True) or defer_caption:
-                    return hash_val, media_caption
+                if not session_key or await self.rate_limiter.acquire(session_key):
+                    base64s, _ = await asyncio.to_thread(
+                        self.http_manager.handle_image, content
+                    )
+                    if base64s:
+                        described = await self.call_llm.call_llm_image_caption(
+                            base64s,
+                            bot_name=bot_name,
+                            group_or_user_id=group_or_user_id,
+                        )
+                        if described:
+                            incoming.genre = described.genre
+                            incoming.character = described.character
+                            incoming.source = described.source
+                            incoming.text = described.text
+                            incoming.caption = described.caption
+                    incoming.is_captioned = True
+                else:
+                    logger.info(
+                        f"[Giftia] Image caption deferred by rate limit: "
+                        f"session={session_key} hash={incoming.hash_val}"
+                    )
+            await self.data_cache.set_caption(incoming)
+            return incoming.hash_val, incoming
 
-            if legacy_caption:
-                canonical_caption = MediaCaption(
-                    hash_val=hash_val,
-                    file_name=db_file_name if file_name else legacy_caption.file_name,
-                    url=db_url,
-                    media_type="image",
-                    genre=legacy_caption.genre,
-                    character=legacy_caption.character,
-                    source=legacy_caption.source,
-                    text=legacy_caption.text,
-                    caption=legacy_caption.caption,
-                    is_captioned=legacy_caption.is_captioned,
-                    width=width or legacy_caption.width,
-                    height=height or legacy_caption.height,
-                    file_size=file_size,
-                )
-                await self.data_cache.set_caption(canonical_caption)
-                if getattr(canonical_caption, "is_captioned", True) or defer_caption:
-                    return hash_val, canonical_caption
+    @staticmethod
+    async def _matches_legacy_image(
+        legacy: MediaCaption, incoming: MediaCaption, content: bytes
+    ) -> bool:
+        """Validate an old filename alias before carrying its description forward.
 
-            if not self.image_caption_enabled:
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=db_url,
-                    media_type="image",
-                    is_captioned=True,
-                    width=width,
-                    height=height,
-                    file_size=file_size,
-                )
-                if file_name:
-                    media_caption.file_name = db_file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
+        Args:
+            legacy: The image row associated with the legacy filename.
+            incoming: Metadata for the original image just received.
+            content: Original image bytes.
 
-            # 如果开启了延迟，直接返回一个仅包含url和hash的基础对象
-            if defer_caption:
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=db_url,
-                    media_type="image",
-                    is_captioned=False,
-                    width=width,
-                    height=height,
-                    file_size=file_size,
-                )
-                if file_name:
-                    media_caption.file_name = db_file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
-
-            # 会话级分钟频控检查 (默认 1 分钟最多 8 张)
-            session_key = (
-                f"{bot_name}:{group_or_user_id}"
-                if (bot_name or group_or_user_id)
-                else ""
+        Returns:
+            Whether the legacy description can be carried forward.
+        """
+        if legacy.content_digest or (
+            legacy.file_size and legacy.file_size != incoming.file_size
+        ):
+            return False
+        if re.fullmatch(r"[a-fA-F0-9]{16,64}", legacy.hash_val):
+            path = (
+                StarTools.get_data_dir("astrbot_plugin_giftia")
+                / "media_cache"
+                / legacy.hash_val
             )
-            if session_key and not await self.rate_limiter.acquire(session_key):
-                logger.info(
-                    f"[Giftia] 会话 {session_key} 达到 1 分钟内图片自动转述频控上限 (8张/分)，当前图片转为延迟转述 (defer_caption): hash={hash_val}"
-                )
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=db_url,
-                    media_type="image",
-                    is_captioned=False,
-                    width=width,
-                    height=height,
-                    file_size=file_size,
-                )
-                if file_name:
-                    media_caption.file_name = db_file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
-
-            # 处理图片
-            base64s, _is_animated = await asyncio.to_thread(
-                self.http_manager.handle_image, image_bytes
-            )
-            if not base64s:
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=db_url,
-                    media_type="image",
-                    is_captioned=True,
-                    width=width,
-                    height=height,
-                    file_size=file_size,
-                )
-                if file_name:
-                    media_caption.file_name = db_file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
-            # Log key identifiers so we can detect if two different URLs produce the
-            # same image content (which would indicate a stale-temp-file read).
-            url_disp = (url[:100] + "...") if url and len(url) > 100 else url
-            logger.info(
-                f"[Giftia] 调用LLM转述图片: hash={hash_val} "
-                f"size={len(image_bytes)}B "
-                f"head={image_bytes[:8].hex()} "
-                f"url={url_disp!r}"
-            )
-            # 调用LLM生成图片描述
-            media_caption = await self.call_llm.call_llm_image_caption(
-                base64s, bot_name=bot_name, group_or_user_id=group_or_user_id
-            )
-            if not media_caption:
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=db_url,
-                    media_type="image",
-                    is_captioned=True,
-                    width=width,
-                    height=height,
-                    file_size=file_size,
-                )
-                if file_name:
-                    media_caption.file_name = db_file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
-            media_caption.hash_val = hash_val
-            media_caption.url = db_url
-            if file_name:
-                media_caption.file_name = db_file_name
-            media_caption.media_type = "image"
-            media_caption.is_captioned = True
-            media_caption.width = width
-            media_caption.height = height
-            media_caption.file_size = file_size
-            # 缓存
-            await self.data_cache.set_caption(media_caption)
-            return hash_val, media_caption
+            if path.is_file():
+                try:
+                    return path.stat().st_size == len(content) and (
+                        await asyncio.to_thread(path.read_bytes) == content
+                    )
+                except OSError:
+                    return False
+        return not legacy.url or legacy.url == incoming.url
 
     async def get_audio_caption(
         self,
@@ -688,110 +690,65 @@ class MessageMediaFormatter:
         bot_name: str = "",
         group_or_user_id: str = "",
     ) -> tuple[str | None, MediaCaption | None]:
-        """获取语音描述"""
-        if not url and file_name:
-            url = file_name
-        async with self.url_locks.lock(url):
-            if file_name and not is_temp_or_local_path(file_name):
-                # 检查缓存
-                hash_val, media_caption = await self.data_cache.get_caption_by_filename(
-                    file_name
+        """Get or generate an audio caption using the confirmed media identity.
+
+        Args:
+            url: Audio source URL.
+            file_name: Platform file reference or local path.
+            defer_caption: Store the audio for later captioning.
+            bot_name: Bot requesting the caption.
+            group_or_user_id: Conversation requesting the caption.
+
+        Returns:
+            The resolved media ID and caption, or two empty values.
+        """
+        source = url or file_name or ""
+        local_source = file_name if is_temp_or_local_path(file_name) else None
+        if not local_source and is_temp_or_local_path(source):
+            local_source = source
+        if not local_source and not self.first_media_url(source, None):
+            legacy = await self._caption_from_filename(file_name, "audio")
+            return (legacy.hash_val, legacy) if legacy else (None, None)
+        async with self.url_locks.lock(source):
+            content = await self.http_manager.download_media(local_source or source)
+            if not content and local_source and local_source != source:
+                content = await self.http_manager.download_media(source)
+
+        incoming = MediaCaption(
+            hash_val=xxh3_64_hexdigest(
+                content if local_source and content else source.encode()
+            ),
+            file_name=file_name or "",
+            url=source,
+            media_type="audio",
+            file_size=len(content),
+            source_key=sha256(source.encode()).hexdigest(),
+            content_digest=sha256(content).hexdigest() if content else "",
+            is_captioned=False,
+        )
+        async with self._media_slot(incoming, content) as existing:
+            if existing:
+                incoming = self._refresh_caption(existing, incoming)
+            if not incoming.is_captioned and not defer_caption:
+                cached = (
+                    StarTools.get_data_dir("astrbot_plugin_giftia")
+                    / "media_cache"
+                    / incoming.hash_val
                 )
-                if hash_val and media_caption:
-                    if getattr(media_caption, "is_captioned", True) or defer_caption:
-                        return hash_val, media_caption
-
-            # 语音的hash_val用url生成，如果是本地文件，使用本地内容生成hash
-            audio_bytes = None
-            if file_name and (
-                file_name.startswith("file://") or is_temp_or_local_path(file_name)
-            ):
-                safe_local_path = get_safe_local_media_path(file_name)
-                if safe_local_path:
-                    try:
-                        audio_bytes = safe_local_path.read_bytes()
-                    except Exception as e:
-                        file_name_disp = (
-                            (file_name[:100] + "...")
-                            if file_name and len(file_name) > 100
-                            else file_name
-                        )
-                        logger.error(f"[Giftia] 读取本地音频失败 {file_name_disp}: {e}")
-
-            if audio_bytes:
-                hash_val = xxh3_64_hexdigest(audio_bytes)
-            else:
-                hash_val = xxh3_64_hexdigest(url.encode())
-
-            # 检查缓存
-            media_caption = await self.data_cache.get_caption_by_hash(hash_val)
-            if media_caption:
-                await self._update_existing_media_caption(
-                    media_caption, url=url, file_name=file_name
+                described = await self.call_llm.call_llm_audio_caption(
+                    [str(cached) if cached.is_file() else source],
+                    bot_name=bot_name,
+                    group_or_user_id=group_or_user_id,
                 )
-                if getattr(media_caption, "is_captioned", True) or defer_caption:
-                    return hash_val, media_caption
-
-            # 下载并保存语音文件，以便永久播放
-            if not audio_bytes:
-                try:
-                    audio_bytes = await self.http_manager.download_media(url)
-                except Exception as e:
-                    url_disp = (url[:100] + "...") if url and len(url) > 100 else url
-                    logger.error(f"[Giftia] 下载音频失败 {url_disp}: {e}")
-
-            if audio_bytes:
-                try:
-                    from astrbot.core.star.star_tools import StarTools
-
-                    cache_dir = (
-                        StarTools.get_data_dir("astrbot_plugin_giftia") / "media_cache"
-                    )
-                    cache_dir.mkdir(parents=True, exist_ok=True)
-                    cache_file = cache_dir / hash_val
-                    if not cache_file.exists():
-                        cache_file.write_bytes(audio_bytes)
-                except Exception as e:
-                    logger.error(f"[Giftia] 保存音频缓存失败: {e}")
-
-            if defer_caption:
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=url,
-                    media_type="audio",
-                    is_captioned=False,
-                )
-                if file_name:
-                    media_caption.file_name = file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
-
-            # 调用LLM生成语音描述
-            media_caption = await self.call_llm.call_llm_audio_caption(
-                [url], bot_name=bot_name, group_or_user_id=group_or_user_id
-            )
-            if not media_caption:
-                # 即使LLM失败，也需要保存一个未转述的或者空的对象，但标记为 captioned=False 方便后续重试
-                media_caption = MediaCaption(
-                    hash_val=hash_val,
-                    url=url,
-                    media_type="audio",
-                    is_captioned=False,
-                )
-                if file_name:
-                    media_caption.file_name = file_name
-                await self.data_cache.set_caption(media_caption)
-                return hash_val, media_caption
-
-            media_caption.hash_val = hash_val
-            media_caption.url = url
-            if file_name:
-                media_caption.file_name = file_name
-            media_caption.media_type = "audio"
-            media_caption.is_captioned = True
-            # 缓存
-            await self.data_cache.set_caption(media_caption)
-            return hash_val, media_caption
+                if described:
+                    incoming.genre = described.genre
+                    incoming.character = described.character
+                    incoming.source = described.source
+                    incoming.text = described.text
+                    incoming.caption = described.caption
+                    incoming.is_captioned = True
+            await self.data_cache.set_caption(incoming)
+            return incoming.hash_val, incoming
 
 
 async def format_node_components(
@@ -861,7 +818,11 @@ async def format_node_components(
             elif db and hasattr(db, "get_media_caption_by_hash"):
                 try:
                     caption = await db.get_media_caption_by_hash(hash_val)
-                    if caption and caption.url:
+                    if caption and caption.media_type == "video":
+                        cache_file = original_media_path(cache_dir, hash_val)
+                    if cache_file.is_file():
+                        comp_v = Video.fromFileSystem(str(cache_file))
+                    elif caption and caption.url:
                         comp_v = Video.fromURL(caption.url)
                     else:
                         comp_v = Plain("[视频]")

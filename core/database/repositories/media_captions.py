@@ -14,8 +14,8 @@ class MediaCaptionsRepository(BaseRepository):
         update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await self.conn.execute(
             """
-            INSERT INTO media_caption (hash_val, file_name, url, media_type, genre, character, source, text, caption, is_captioned, duration, file_size, width, height, query_times, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO media_caption (hash_val, file_name, url, media_type, genre, character, source, text, caption, is_captioned, duration, file_size, width, height, content_digest, source_key, query_times, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(hash_val) DO UPDATE SET
                 file_name = excluded.file_name,
                 url = excluded.url,
@@ -30,6 +30,8 @@ class MediaCaptionsRepository(BaseRepository):
                 file_size = excluded.file_size,
                 width = excluded.width,
                 height = excluded.height,
+                content_digest = COALESCE(excluded.content_digest, media_caption.content_digest),
+                source_key = COALESCE(excluded.source_key, media_caption.source_key),
                 updated_at = excluded.updated_at
             """,
             (
@@ -47,6 +49,8 @@ class MediaCaptionsRepository(BaseRepository):
                 int(getattr(media_caption, "file_size", 0) or 0),
                 int(media_caption.width or 0),
                 int(media_caption.height or 0),
+                media_caption.content_digest or None,
+                media_caption.source_key or None,
                 0,
                 update_time,
                 update_time,
@@ -58,7 +62,7 @@ class MediaCaptionsRepository(BaseRepository):
     async def get_media_caption_by_hash(self, hash_val: str) -> MediaCaption | None:
         async with self.conn.execute(
             """
-            SELECT hash_val, file_name, url, media_type, genre, character, source, text, caption, is_captioned, duration, file_size, width, height, query_times FROM media_caption WHERE hash_val = ?
+            SELECT hash_val, file_name, url, media_type, genre, character, source, text, caption, is_captioned, duration, file_size, width, height, content_digest, source_key, query_times FROM media_caption WHERE hash_val = ?
             """,
             (hash_val,),
         ) as cursor:
@@ -91,6 +95,8 @@ class MediaCaptionsRepository(BaseRepository):
                 file_size=file_size,
                 width=int(row["width"] or 0),
                 height=int(row["height"] or 0),
+                content_digest=row["content_digest"] or "",
+                source_key=row["source_key"] or "",
             )
             return caption
         return None
@@ -101,7 +107,7 @@ class MediaCaptionsRepository(BaseRepository):
     ) -> MediaCaption | None:
         async with self.conn.execute(
             """
-            SELECT hash_val, file_name, url, media_type, genre, character, source, text, caption, is_captioned, duration, file_size, width, height, query_times FROM media_caption WHERE file_name = ?
+            SELECT hash_val, file_name, url, media_type, genre, character, source, text, caption, is_captioned, duration, file_size, width, height, content_digest, source_key, query_times FROM media_caption WHERE file_name = ?
             """,
             (file_name,),
         ) as cursor:
@@ -134,9 +140,44 @@ class MediaCaptionsRepository(BaseRepository):
                 file_size=file_size,
                 width=int(row["width"] or 0),
                 height=int(row["height"] or 0),
+                content_digest=row["content_digest"] or "",
+                source_key=row["source_key"] or "",
             )
             return caption
         return None
+
+    @serialized_operation
+    async def find_media_ids(
+        self, media_type: str, content_digest: str, source_key: str
+    ) -> list[str]:
+        """Find previous allocations, preferring exact content identities.
+
+        Args:
+            media_type: Image, audio, or video.
+            content_digest: SHA-256 of original bytes when available.
+            source_key: Digest of the full media reference when available.
+
+        Returns:
+            Candidate IDs in matching order.
+        """
+        async with self.conn.execute(
+            """
+            SELECT hash_val FROM media_caption
+            WHERE media_type = ? AND (content_digest = ? OR source_key = ?)
+            ORDER BY CASE
+                WHEN content_digest = ? THEN 0
+                WHEN content_digest IS NOT NULL THEN 1
+                ELSE 2
+            END, id
+            """,
+            (
+                media_type,
+                content_digest or None,
+                source_key or None,
+                content_digest or None,
+            ),
+        ) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
 
     @serialized_operation
     async def update_media_caption(
@@ -147,7 +188,8 @@ class MediaCaptionsRepository(BaseRepository):
         await self.conn.execute(
             """
             UPDATE media_caption
-            SET genre = ?, character = ?, source = ?, text = ?, caption = ?, is_captioned = ?, duration = ?, file_size = ?, width = ?, height = ?, updated_at = ?
+            SET genre = ?, character = ?, source = ?, text = ?, caption = ?, is_captioned = ?, duration = ?, file_size = ?, width = ?, height = ?,
+                content_digest = COALESCE(content_digest, ?), updated_at = ?
             WHERE hash_val = ?
             """,
             (
@@ -161,6 +203,7 @@ class MediaCaptionsRepository(BaseRepository):
                 int(getattr(media_caption, "file_size", 0) or 0),
                 int(media_caption.width or 0),
                 int(media_caption.height or 0),
+                media_caption.content_digest or None,
                 update_time,
                 media_caption.hash_val,
             ),

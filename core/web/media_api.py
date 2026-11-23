@@ -6,6 +6,8 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
 
+from ..utils.path_security import original_media_path
+
 
 class MediaApi:
     """Media management APIs: captions CRUD, file serving, genres, cache cleaning."""
@@ -29,6 +31,7 @@ class MediaApi:
         Returns:
             The detected MIME content type string.
         """
+        media_type = getattr(media_caption, "media_type", None)
         magic_type = None
         name_type = None
 
@@ -59,7 +62,7 @@ class MediaApi:
             elif header.startswith(b"fLaC"):
                 magic_type = "audio/flac"
             elif header[4:8] == b"ftyp":
-                magic_type = "audio/mp4"
+                magic_type = "video/mp4" if media_type == "video" else "audio/mp4"
             elif header.startswith(b"#!AMR\n") or header.startswith(b"#!AMR-WB\n"):
                 magic_type = "audio/amr"
             elif header.startswith(b"#!SILK_V3\n"):
@@ -75,11 +78,12 @@ class MediaApi:
             if file_name:
                 name_type, _ = mimetypes.guess_type(file_name)
             if not name_type:
-                mt = getattr(media_caption, "media_type", None)
-                if mt == "image":
+                if media_type == "image":
                     name_type = "image/jpeg"
-                elif mt in ("audio", "voice"):
+                elif media_type in ("audio", "voice"):
                     name_type = "audio/mpeg"
+                elif media_type == "video":
+                    name_type = "video/mp4"
 
         return magic_type or name_type or fallback
 
@@ -99,7 +103,7 @@ class MediaApi:
         return bool(re.fullmatch(r"^[a-zA-Z0-9_\-]{1,64}$", hash_val))
 
     def _resolve_cache_file(
-        self, hash_val: str, is_thumbnail: bool = False
+        self, hash_val: str, is_thumbnail: bool = False, *, video: bool = False
     ) -> Path | None:
         """Safely resolve media cache file path ensuring it stays strictly inside the designated directory."""
         if not self._is_valid_hash(hash_val):
@@ -113,12 +117,37 @@ class MediaApi:
             return None
 
         try:
-            target_file = (target_dir / hash_val).resolve()
+            target_file = (
+                original_media_path(target_dir, hash_val)
+                if video
+                else target_dir / hash_val
+            ).resolve()
             if target_file.is_relative_to(target_dir):
                 return target_file
             return None
         except (ValueError, OSError):
             return None
+
+    async def _media_file_and_caption(self, hash_val: str):
+        """Find the cached original and metadata, including legacy video files.
+
+        Args:
+            hash_val: Media ID from the file request.
+
+        Returns:
+            The safe cache path, if present, and the associated caption metadata.
+        """
+        path = self._resolve_cache_file(hash_val)
+        if path is None:
+            return None, None
+        caption = None
+        try:
+            caption = await self.giftia.db.get_media_caption_by_hash(hash_val)
+        except Exception as error:
+            logger.warning(f"[Giftia API] Could not look up media type: {error}")
+        if not path.is_file() and getattr(caption, "media_type", None) == "video":
+            path = self._resolve_cache_file(hash_val, video=True)
+        return path, caption
 
     # ── Caption CRUD ────────────────────────────────────────────────────
 
@@ -355,15 +384,9 @@ class MediaApi:
         try:
             from astrbot.api.web import file_response
 
-            cache_file = self._resolve_cache_file(hash_val)
+            cache_file, media_caption = await self._media_file_and_caption(hash_val)
             if not cache_file or not cache_file.is_file():
                 return error_response("文件不存在或已被删除", status_code=404)
-
-            media_caption = None
-            try:
-                media_caption = await self.giftia.db.get_media_caption_by_hash(hash_val)
-            except Exception as e:
-                logger.warning(f"[Giftia API] 无法从数据库获取媒体类型: {e}")
 
             content_type = self._detect_content_type(cache_file, media_caption)
 
@@ -377,15 +400,9 @@ class MediaApi:
         try:
             import base64
 
-            cache_file = self._resolve_cache_file(hash_val)
+            cache_file, media_caption = await self._media_file_and_caption(hash_val)
             if not cache_file or not cache_file.is_file():
                 return error_response("文件不存在或已被删除", status_code=404)
-
-            media_caption = None
-            try:
-                media_caption = await self.giftia.db.get_media_caption_by_hash(hash_val)
-            except Exception as e:
-                logger.warning(f"[Giftia API] 无法从数据库获取媒体类型: {e}")
 
             # 根据 media_type 推断 fallback：
             #  - 音频类 → audio/mpeg（即使检测失败，PC 浏览器至少能正确处理错误）
@@ -435,15 +452,9 @@ class MediaApi:
         try:
             import base64
 
-            cache_file = self._resolve_cache_file(hash_val)
+            cache_file, media_caption = await self._media_file_and_caption(hash_val)
             if not cache_file or not cache_file.is_file():
                 return error_response("文件不存在或已被删除", status_code=404)
-
-            media_caption = None
-            try:
-                media_caption = await self.giftia.db.get_media_caption_by_hash(hash_val)
-            except Exception as e:
-                logger.warning(f"[Giftia API] 无法从数据库获取媒体类型: {e}")
 
             content_type = self._detect_content_type(
                 cache_file, media_caption, fallback="image/jpeg"

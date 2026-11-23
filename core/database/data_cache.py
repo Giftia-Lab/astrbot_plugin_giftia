@@ -886,11 +886,11 @@ class DataCache:
         return None, None
 
     async def set_caption(self, caption: MediaCaption, is_new: bool = True) -> None:
+        if is_new:
+            await self.db.insert_media_caption(media_caption=caption)
         self.caption[caption.hash_val] = caption
         if caption.file_name and not is_temp_or_local_path(caption.file_name):
             self.filename_to_hash[caption.file_name] = caption.hash_val
-        if is_new:
-            await self.db.insert_media_caption(media_caption=caption)
 
     async def update_caption(self, caption: MediaCaption) -> None:
         self.caption[caption.hash_val] = caption

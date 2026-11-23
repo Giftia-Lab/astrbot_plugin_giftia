@@ -91,6 +91,8 @@ TABLE_DEFINITIONS = (
         file_size INTEGER DEFAULT 0,
         width INTEGER DEFAULT 0,
         height INTEGER DEFAULT 0,
+        content_digest TEXT,
+        source_key TEXT,
         query_times INTEGER,
         created_at DATETIME,
         updated_at DATETIME
@@ -316,6 +318,7 @@ INDEX_DEFINITIONS = (
     """
     CREATE INDEX IF NOT EXISTS idx_hash_val ON media_caption (hash_val)
     """,
+    *migrations.MEDIA_IDENTITY_INDEXES,
     """
     CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_group_unique ON bot_status (group_or_user_id, bot_name)
     """,

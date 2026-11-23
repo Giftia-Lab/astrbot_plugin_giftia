@@ -1,3 +1,5 @@
+import contextlib
+import os
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -5,6 +7,53 @@ from pathlib import Path
 from astrbot.api import logger
 
 _CACHED_ALLOWED_ROOTS: list[Path] | None = None
+
+
+def original_media_path(cache_dir: Path, media_id: str) -> Path:
+    """Resolve an original cache file, including old videos stored with a suffix.
+
+    Args:
+        cache_dir: Giftia's media cache directory.
+        media_id: Validated media ID.
+
+    Returns:
+        The existing original or the canonical path where it can be saved.
+    """
+    path = cache_dir / media_id
+    if not path.is_file():
+        legacy = cache_dir / f"{media_id}.mp4"
+        if legacy.is_file():
+            return legacy
+    return path
+
+
+def save_media_cache_file(path: Path, content: bytes) -> bool:
+    """Publish a complete cache file without replacing an existing original.
+
+    Args:
+        path: Destination for the original media.
+        content: Complete original file.
+
+    Returns:
+        Whether a new file was saved at the destination.
+    """
+    temp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
+            temp_path = Path(file.name)
+            file.write(content)
+        os.link(temp_path, path)
+        return True
+    except FileExistsError:
+        return False
+    except OSError as error:
+        logger.error(f"[Giftia] Could not cache media {path.name}: {error}")
+        return False
+    finally:
+        if temp_path is not None:
+            with contextlib.suppress(OSError):
+                temp_path.unlink(missing_ok=True)
 
 
 def get_allowed_roots() -> list[Path]:
