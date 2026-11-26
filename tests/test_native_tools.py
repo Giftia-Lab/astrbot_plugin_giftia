@@ -9,12 +9,6 @@ from xml.etree.ElementTree import fromstring
 
 import pytest
 import pytest_asyncio
-from astrbot.api.star import Context
-from astrbot.core.agent.tool import ToolSet
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-    AiocqhttpMessageEvent,
-)
-
 from core.conversation.action_dispatcher import ActionDispatcher
 from core.handlers.commands import CommandHandler
 from core.llm.call_llm import CallLLM
@@ -30,6 +24,13 @@ from core.llm.prompt import build_reply_prompt
 from core.llm.xml_parse import XmlParse
 from core.utils.scheduler import Scheduler
 from core.utils.schemas import MessageData
+
+from astrbot.api.star import Context
+from astrbot.core.agent.tool import ToolSet
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
+from astrbot.core.provider.func_tool_manager import FunctionToolManager
 
 
 @pytest_asyncio.fixture
@@ -524,6 +525,39 @@ async def test_all_function_tools_follow_the_selected_global_calling_mode(
         assert call["max_steps"] == 7
     if force_xml:
         assert "不使用原生 function calling" in call["system_prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "web_search, provider, include_tavily",
+    [(False, "tavily", False), (True, "brave", False), (True, "tavily", True)],
+)
+async def test_reply_loads_tavily_tools_from_astrbot(
+    runtime, web_search, provider, include_tavily
+):
+    rt = runtime
+    tool_manager = FunctionToolManager()
+    tool_manager.add_func("plugin_tool", [], "A registered plugin tool.", AsyncMock())
+    rt.context.get_llm_tool_manager = lambda: tool_manager
+    rt.context.astrbot_config_mgr = SimpleNamespace(
+        default_conf={
+            "provider_settings": {
+                "web_search": web_search,
+                "websearch_provider": provider,
+            }
+        }
+    )
+
+    result = await rt.caller.call_llm_reply(
+        rt.event, "group", ["provider"], "persona", "input", use_source_tools=True
+    )
+
+    assert result.msg_texts == ["finished"]
+    tools = rt.context.tool_loop_agent.await_args.kwargs["tools"]
+    expected_names = {"plugin_tool"}
+    if include_tavily:
+        expected_names.update({"web_search_tavily", "tavily_extract_web_page"})
+    assert {tool.name for tool in tools.tools} == expected_names
 
 
 @pytest.mark.asyncio

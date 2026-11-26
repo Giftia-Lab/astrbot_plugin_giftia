@@ -748,38 +748,36 @@ class CallLLM:
         """
         tool_manager = self.context.get_llm_tool_manager()
         tools_set = tool_manager.get_full_tool_set()
-        # Built-in Tavily tools are not included in the full tool set.
-        # Add them only when Tavily web search is enabled.
-        merged_builtin_tools: list[str] = []
         try:
             provider_settings = self.context.astrbot_config_mgr.default_conf.get(
                 "provider_settings", {}
             )
         except Exception:
             provider_settings = {}
-        if bool(provider_settings.get("web_search")) and (
+        if provider_settings.get("web_search") and (
             provider_settings.get("websearch_provider") == "tavily"
         ):
-            existing_names = {t.name for t in tools_set.tools}
-            for builtin_name in (
-                "web_search_tavily",
-                "tavily_extract_web_page",
-            ):
-                if builtin_name in existing_names or not tool_manager.is_builtin_tool(
-                    builtin_name
-                ):
-                    continue
-                builtin_tool = tool_manager.get_builtin_tool(builtin_name)
-                tools_set.add_tool(builtin_tool)
-                existing_names.add(builtin_name)
-                merged_builtin_tools.append(builtin_name)
-        if merged_builtin_tools:
-            logger.debug(
-                f"<native_tool_merge>\n"
-                f"  added: {merged_builtin_tools}\n"
-                f"  reason: provider_settings.web_search=True, websearch_provider=tavily\n"
-                f"</native_tool_merge>"
-            )
+            get_builtin_tool = getattr(tool_manager, "get_builtin_tool", None)
+            if get_builtin_tool is None:
+                # Newer AstrBot runtimes construct built-in tools per request.
+                from astrbot.core.astr_agent_runtime.tools.web_search_tools import (
+                    TavilyExtractWebPageTool,
+                    TavilyWebSearchTool,
+                )
+
+                for tool in (TavilyWebSearchTool(), TavilyExtractWebPageTool()):
+                    if tools_set.get_tool(tool.name) is None:
+                        tools_set.add_tool(tool)
+            else:
+                for name in ("web_search_tavily", "tavily_extract_web_page"):
+                    if tools_set.get_tool(name) is not None:
+                        continue
+                    try:
+                        tool = get_builtin_tool(name)
+                    except KeyError:
+                        continue
+                    tools_set.add_tool(tool)
+
         for tool in tools_set.tools[:]:
             if not tool.active:
                 tools_set.remove_tool(tool.name)
@@ -807,29 +805,6 @@ class CallLLM:
             )
             + "\n</native_tools>"
         )
-        target_tool_name = "web_search_tavily"
-        target_tool = next(
-            (t for t in tools_set.tools if t.name == target_tool_name),
-            None,
-        )
-        if target_tool is None:
-            is_builtin = tool_manager.is_builtin_tool(target_tool_name)
-            logger.debug(
-                f"<native_tool_probe>\n"
-                f"  target: {target_tool_name}\n"
-                f"  in_tools_set: False\n"
-                f"  is_builtin_tool: {is_builtin}\n"
-                f"  hint: {'Built-in tool is excluded from the full tool set' if is_builtin else 'Tool is not registered'}\n"
-                f"</native_tool_probe>"
-            )
-        else:
-            logger.debug(
-                f"<native_tool_probe>\n"
-                f"  target: {target_tool_name}\n"
-                f"  in_tools_set: True\n"
-                f"  active: {target_tool.active}\n"
-                f"</native_tool_probe>"
-            )
         return tools_set
 
     async def call_llm_image_caption(
