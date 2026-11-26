@@ -455,11 +455,6 @@ class DecisionEngine:
         if result.reply_decision == 0 or result.reply_decision == 2:
             return False, None, None, None
 
-        # 重置接话活跃分析窗口
-        fmt_key = f"{bot_name}:{group_or_user_id}"
-        window_size = decision_conf.get("reply_active_window", 10)
-        self.plugin.active_reply_counters[fmt_key] = window_size
-
         # 如果命中 RAG，执行记忆搜索
         if result.use_rag == 1 and self.plugin.embedding_conf.get("enabled", False):
             with collect_recall_timing(timing):

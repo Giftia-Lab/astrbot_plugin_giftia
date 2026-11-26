@@ -22,6 +22,7 @@ from core.llm.call_llm import CallLLM
 from core.llm.prompt import build_decision_prompt, build_reply_review_prompt
 from core.llm.xml_parse import XmlParse
 from core.utils.schemas import (
+    Decision,
     MediaCaption,
     MessageData,
     Status,
@@ -318,6 +319,49 @@ async def test_silent_thought_snapshot_follows_its_message_only_in_this_conversa
     assert (
         fromstring(f"<context>{decision}</context>").find(".//pinned_thought").text
         == secret
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "remaining_rounds, output, expected_rounds",
+    [
+        (0, "", 0),
+        (1, "", 0),
+        (4, "", 3),
+        (4, "<message> </message>", 3),
+        (4, "<message>收到</message>", 7),
+    ],
+)
+async def test_reply_window_refresh_requires_message_content(
+    runtime, remaining_rounds, output, expected_rounds
+):
+    plugin = runtime.plugin
+    plugin.bot_map["bot"]["decision_conf"].update(
+        provider_ids=["decision"], reply_active_window=7, proactive_probability=100
+    )
+    plugin.active_reply_counters["bot:group"] = remaining_rounds
+    decision_engine = runtime.manager.decision_engine
+    del decision_engine.get_trigger, decision_engine.evaluate_decision
+    plugin.call_llm.call_llm_decision = AsyncMock(
+        return_value=Decision(reply_decision=1)
+    )
+    plugin.call_llm.call_llm_reply.side_effect = None
+    plugin.call_llm.call_llm_reply.return_value = await XmlParse(
+        None, None
+    ).decode_llm_xml(f"<status>状态: 正在听</status>{output}", "group")
+
+    await runtime.send("聊聊近况")
+    await runtime.drain()
+
+    plugin.call_llm.call_llm_decision.assert_awaited_once()
+    plugin.call_llm.call_llm_reply.assert_awaited_once()
+    written_status = plugin.data_cache.set_bot_status.await_args.kwargs["status"]
+    assert written_status.state == "正在听"
+    assert plugin.active_reply_counters["bot:group"] == expected_rounds
+    assert (("bot", "group") in plugin.context_windows.windows) == (expected_rounds > 0)
+    assert plugin.passive_memory_manager.reset_silence_counter.await_count == (
+        expected_rounds == 7
     )
 
 

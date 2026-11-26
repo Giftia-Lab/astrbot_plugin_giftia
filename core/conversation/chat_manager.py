@@ -1308,8 +1308,11 @@ class ChatManager:
                         and hasattr(self.plugin, "tts_manager")
                         and self.plugin.tts_manager.enabled(bot_conf)
                     )
-                    has_sent_reply = has_sent_reply or bool(
-                        chunk.msg_chains or has_tts_reply or chunk.repeat_message_ids
+                    has_sent_reply = (
+                        has_sent_reply
+                        or any(chunk.msg_chains)
+                        or has_tts_reply
+                        or bool(chunk.repeat_message_ids)
                     )
             if has_sent_reply:
                 self.plugin.active_reply_counters[reply_key] = bot_conf.get(
@@ -1675,7 +1678,7 @@ class ChatManager:
                                 and self.plugin.tts_manager.enabled(bot_conf)
                             )
                             if (
-                                chunk.msg_chains
+                                any(chunk.msg_chains)
                                 or has_tts_reply
                                 or chunk.repeat_message_ids
                             ):
