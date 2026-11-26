@@ -204,7 +204,12 @@ class MessageParser:
         return " ".join(parts)
 
     async def parse_user_message(
-        self, event: AstrMessageEvent, bot_name: str, defer_caption: bool = False
+        self,
+        event: AstrMessageEvent,
+        bot_name: str,
+        defer_caption: bool = False,
+        *,
+        received_at: float | None = None,
     ) -> tuple[MessageData | None, list[str], list[str]]:
         """Parse and store a conversation message, skipping unsupported events.
 
@@ -212,6 +217,7 @@ class MessageParser:
             event: Incoming conversation event.
             bot_name: Owning bot configuration.
             defer_caption: Whether media descriptions may be deferred.
+            received_at: Monotonic time before the event waited for parsing.
 
         Returns:
             Stored message and media URLs, or an empty result for ignored events.
@@ -258,7 +264,11 @@ class MessageParser:
 
         iso_string = datetime.fromtimestamp(event.message_obj.timestamp).isoformat()
         parsed = await self.chain_to_result(
-            event.get_messages(), defer_caption, event=event
+            event.get_messages(),
+            defer_caption,
+            event=event,
+            received_at=received_at,
+            caption_session=(bot_name, group_or_user_id),
         )
         msg = (
             notice_result.content
@@ -362,6 +372,9 @@ class MessageParser:
         event: AstrMessageEvent | None = None,
         _forward_ctx: dict | None = None,
         _depth: int = 0,
+        *,
+        received_at: float | None = None,
+        caption_session: tuple[str, str] | None = None,
     ) -> ChainParseResult:
         """将消息链转换为可入库的正文、媒体脚注和转发结构。"""
         if _forward_ctx is None:
@@ -393,6 +406,8 @@ class MessageParser:
                         event=event,
                         _forward_ctx=_forward_ctx,
                         _depth=_depth + 1,
+                        received_at=received_at,
+                        caption_session=caption_session,
                     )
                     result.merge(quote_result)
                     quote_text = quote_result.content
@@ -420,6 +435,8 @@ class MessageParser:
                     curr_defer,
                     custom_desc=custom_desc,
                     event=event,
+                    received_at=received_at,
+                    caption_session=caption_session,
                 )
                 result.merge(media_result)
                 msg_parts.append(part)
@@ -529,6 +546,9 @@ class MessageParser:
         defer_caption: bool,
         custom_desc: str | None = None,
         event: AstrMessageEvent | None = None,
+        *,
+        received_at: float | None = None,
+        caption_session: tuple[str, str] | None = None,
     ) -> tuple[str, ChainParseResult]:
         return await self.media_formatter.format_image_ref(
             url,
@@ -536,6 +556,8 @@ class MessageParser:
             defer_caption,
             custom_desc=custom_desc,
             event=event,
+            received_at=received_at,
+            caption_session=caption_session,
         )
 
     async def _format_audio_ref(

@@ -2,6 +2,7 @@ import asyncio
 import random
 import re
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from xml.sax.saxutils import quoteattr
 
@@ -681,7 +682,9 @@ class ActionDispatcher:
                 else:
                     try:
                         parsed_msg = await self.plugin.message_parser.chain_to_result(
-                            msg_chain, event=event
+                            msg_chain,
+                            event=event,
+                            caption_session=(bot_name, group_or_user_id),
                         )
                         db_content = parsed_msg.content
                         media_id_list = parsed_msg.media_id_list
@@ -807,7 +810,9 @@ class ActionDispatcher:
                     )
                     try:
                         parsed_msg = await self.plugin.message_parser.chain_to_result(
-                            msg_chain, event=event
+                            msg_chain,
+                            event=event,
+                            caption_session=(bot_name, group_or_user_id),
                         )
                         db_content = parsed_msg.content
                         media_id_list = parsed_msg.media_id_list
@@ -1013,14 +1018,22 @@ class ActionDispatcher:
         )
         input_anchor = llm_result.thought_anchor
         llm_result.thought_anchor = None
+        formatter = getattr(
+            getattr(self.plugin, "message_parser", None), "media_formatter", None
+        )
         try:
-            await dispatch_outputs(
-                event=event,
-                bot_name=bot_name,
-                nickname=nickname,
-                group_or_user_id=group_or_user_id,
-                llm_result=llm_result,
-            )
+            with (
+                formatter.defer_image_captions(bot_name, group_or_user_id)
+                if formatter is not None
+                else nullcontext()
+            ):
+                await dispatch_outputs(
+                    event=event,
+                    bot_name=bot_name,
+                    nickname=nickname,
+                    group_or_user_id=group_or_user_id,
+                    llm_result=llm_result,
+                )
             # Only an accepted silent turn may annotate its frozen input.
             if llm_result.thought_anchor is None:
                 llm_result.thought_anchor = input_anchor

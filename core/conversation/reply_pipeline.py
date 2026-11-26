@@ -2,6 +2,7 @@ import asyncio
 import random
 import re
 import uuid
+from contextlib import ExitStack
 from copy import deepcopy
 
 from astrbot.api import logger
@@ -230,6 +231,7 @@ class ReplyPipeline:
         cross_group_names: dict[str, str] | None = None,
         delegation_delivery: bool = False,
         timing: ReplyTiming | None = None,
+        delivery_scope: ExitStack | None = None,
     ):
         """Generate frozen reply turns and review the first eligible unsent draft.
 
@@ -255,6 +257,7 @@ class ReplyPipeline:
             cross_group_names: Known names for the frozen source-group windows.
             delegation_delivery: Resume a completed background task for its user.
             timing: Timing for the first reply request after a batch decision.
+            delivery_scope: Kept open by the caller through all accepted sends.
 
         Yields:
             Parsed reply results ready for action dispatch.
@@ -812,6 +815,20 @@ class ReplyPipeline:
             if passed is False:
                 raise ReplyReviewRejected("New messages conflict with the unsent draft")
 
+        if delivery_scope is not None and (
+            any(llm_result.msg_chains)
+            or llm_result.tts_segments
+            or llm_result.repeat_message_ids
+            or llm_result.tools_to_call
+        ):
+            formatter = getattr(
+                getattr(self.plugin, "message_parser", None), "media_formatter", None
+            )
+            if formatter is not None:
+                delivery_scope.enter_context(
+                    formatter.defer_image_captions(bot_name, group_or_user_id)
+                )
+
         # 5. 空回复拦截处理
         if (
             not remind_message
@@ -905,5 +922,6 @@ class ReplyPipeline:
                 cross_group_context=cross_group_context,
                 cross_group_names=cross_group_names,
                 delegation_delivery=delegation_delivery,
+                delivery_scope=delivery_scope,
             ):
                 yield chunk

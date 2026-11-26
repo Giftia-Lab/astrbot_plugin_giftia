@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 from collections import deque
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -425,6 +426,7 @@ class ChatManager:
         task.add_done_callback(task_done)
 
     async def job(self, event: AstrMessageEvent):
+        received_at = time.monotonic()
         # 获取基础信息
         bot_name = self.plugin.adapter_id_map.get(event.platform_meta.id)
         if not bot_name:
@@ -484,7 +486,7 @@ class ChatManager:
                 _image_urls,
                 _audio_urls,
             ) = await self.plugin.message_parser.parse_user_message(
-                event, bot_name, defer_caption=should_defer
+                event, bot_name, defer_caption=should_defer, received_at=received_at
             )
             if current_message is None:
                 return False
@@ -1260,6 +1262,7 @@ class ChatManager:
             self.plugin.replying_status.get(reply_key, 0) + 1
         )
         pending_recall_memories = pending_recall_memories or []
+        delivery_scope = ExitStack()
         try:
             has_sent_reply = False
             async for chunk in self.reply_pipeline.dispatch_llm_reply_loop(
@@ -1275,6 +1278,7 @@ class ChatManager:
                 review_after_id=review_after_id,
                 other_data=[review_context] if review_context else None,
                 timing=timing,
+                delivery_scope=delivery_scope,
                 **(
                     {"remind_message": delegation_result, "delegation_delivery": True}
                     if delegation_result
@@ -1314,6 +1318,7 @@ class ChatManager:
                         or has_tts_reply
                         or bool(chunk.repeat_message_ids)
                     )
+            delivery_scope.close()
             if has_sent_reply:
                 self.plugin.active_reply_counters[reply_key] = bot_conf.get(
                     "decision_conf", {}
@@ -1336,6 +1341,7 @@ class ChatManager:
             )
             return True
         finally:
+            delivery_scope.close()
             self.plugin.replying_status[reply_key] = max(
                 0, self.plugin.replying_status.get(reply_key, 0) - 1
             )
@@ -1615,6 +1621,7 @@ class ChatManager:
             self.plugin.replying_status[reply_key] = (
                 self.plugin.replying_status.get(reply_key, 0) + 1
             )
+            delivery_scope = ExitStack()
             try:
                 mock_event = self.fake_event(
                     self_id=self_id,
@@ -1658,6 +1665,7 @@ class ChatManager:
                     remind_message=remind_message,
                     pending_recall_memories=pending_recall_memories,
                     task_creator_names=task_creator_names,
+                    delivery_scope=delivery_scope,
                 ):
                     if not self.decision_engine.is_session_allowed(
                         bot_name, group_or_user_id, is_private=not bool(group_id)
@@ -1686,6 +1694,7 @@ class ChatManager:
                     else:
                         logger.error(f"{bot_name} 定时任务调度失败，未获取到回复内容")
 
+                delivery_scope.close()
                 if has_sent_reply:
                     fmt_key = f"{bot_name}:{group_or_user_id}"
                     bot_conf = self.plugin.bot_map.get(bot_name, {})
@@ -1706,6 +1715,7 @@ class ChatManager:
                     user_ids=[str(user_id)] if user_id else [],
                 )
             finally:
+                delivery_scope.close()
                 self.plugin.replying_status[reply_key] = max(
                     0, self.plugin.replying_status.get(reply_key, 0) - 1
                 )

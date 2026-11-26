@@ -3,7 +3,7 @@ import asyncio
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import pytest
 from aiocqhttp import Event
@@ -107,7 +107,7 @@ async def test_inactive_media_is_always_deferred(
     await manager.job(event)
 
     plugin.message_parser.parse_user_message.assert_awaited_once_with(
-        event, "bot", defer_caption=expected_defer
+        event, "bot", defer_caption=expected_defer, received_at=ANY
     )
 
 

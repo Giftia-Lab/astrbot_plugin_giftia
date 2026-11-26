@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections import defaultdict
+from contextlib import ExitStack
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -333,8 +334,19 @@ class Giftia(Star):
                 ):
                     bot_conf = self.bot_map.get(bot_name, {})
                     nickname = bot_conf.get("nickname", bot_name)
+                    caption_session_id = session_obj.session_id
+                    if (
+                        session_obj.message_type == MessageType.GROUP_MESSAGE
+                        and "_" in caption_session_id
+                    ):
+                        adapter = self.chat_manager.get_platform_adapter(
+                            session_obj.platform_name
+                        )
+                        if adapter and adapter[1].name == "aiocqhttp":
+                            caption_session_id = caption_session_id.rsplit("_", 1)[-1]
                     parsed_msg = await self.message_parser.chain_to_result(
-                        message_chain.chain, defer_caption=False
+                        message_chain.chain,
+                        caption_session=(bot_name, caption_session_id),
                     )
 
                     self_id = ""
@@ -842,6 +854,7 @@ class Giftia(Star):
                     self.replying_status.get(reply_key, 0) + 1
                 )
                 pending_recall_memories = []
+                delivery_scope = ExitStack()
                 try:
                     async for (
                         chunk
@@ -852,6 +865,7 @@ class Giftia(Star):
                         group_or_user_id=group_or_user_id,
                         remind_message=remind_msg,
                         pending_recall_memories=pending_recall_memories,
+                        delivery_scope=delivery_scope,
                     ):
                         if chunk:
                             if isinstance(chunk, XmlLlmResult):
@@ -864,6 +878,7 @@ class Giftia(Star):
                                     llm_result=chunk,
                                 )
                 finally:
+                    delivery_scope.close()
                     self.replying_status[reply_key] = max(
                         0, self.replying_status.get(reply_key, 0) - 1
                     )

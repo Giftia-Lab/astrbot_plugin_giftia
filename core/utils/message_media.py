@@ -6,7 +6,7 @@ import re
 import time
 import urllib.parse
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from itertools import chain, count
 from pathlib import Path
@@ -44,7 +44,7 @@ VIDEO_AUTH_QUERY_PARAMS = frozenset({"rkey", "token"})
 
 
 class SessionCaptionRateLimiter:
-    """滑动时间窗口会话级图片自动转述频控器 (默认 60 秒滑动窗口内最多 8 张)。"""
+    """Limit automatic image captions per session in a sliding time window."""
 
     def __init__(self, window_seconds: float = 60.0, max_requests: int = 8):
         self.window_seconds = window_seconds
@@ -52,28 +52,60 @@ class SessionCaptionRateLimiter:
         self._history: dict[str, deque[float]] = {}
         self._lock = asyncio.Lock()
 
-    async def acquire(self, session_key: str) -> bool:
-        """检查并尝试消耗 1 个转述配额。若允许转述返回 True，超频返回 False。"""
+    async def acquire(
+        self,
+        session_key: str,
+        *,
+        received_at: float | None = None,
+        check_only: bool = False,
+    ) -> bool:
+        """Reserve a caption slot for the incoming image.
+
+        Args:
+            session_key: Conversation whose caption quota applies.
+            received_at: Monotonic receipt time, or None to use the current time.
+            check_only: Check eligibility without reserving a slot.
+
+        Returns:
+            Whether to start captioning the image now.
+        """
         if not session_key:
             return True
-        now = time.monotonic()
         async with self._lock:
-            queue = self._history.setdefault(session_key, deque())
-            while queue and now - queue[0] > self.window_seconds:
-                queue.popleft()
-            if len(queue) >= self.max_requests:
+            now = time.monotonic()
+            received_at = now if received_at is None else min(received_at, now)
+            if self.max_requests <= 0 or now - received_at > self.window_seconds:
                 return False
+            queue = self._history.get(session_key)
+            # A slot that expired while the message was queued still counts for it.
+            if (
+                queue
+                and len(queue) == self.max_requests
+                and received_at - queue[0] <= self.window_seconds
+            ):
+                return False
+            if check_only:
+                return True
+            if queue is None:
+                queue = self._history[session_key] = deque(maxlen=self.max_requests)
             queue.append(now)
-            # 轻量维护：若字典过大，顺便清理无用键
             if len(self._history) > 1000:
-                empty_keys = [
-                    k
-                    for k, q in self._history.items()
-                    if not q or now - q[-1] > self.window_seconds
+                # Recent arrivals can still look back one window from receipt.
+                stale_keys = [
+                    key
+                    for key, timestamps in self._history.items()
+                    if now - timestamps[-1] > 2 * self.window_seconds
                 ]
-                for k in empty_keys:
-                    self._history.pop(k, None)
+                for key in stale_keys:
+                    self._history.pop(key, None)
             return True
+
+
+@dataclass
+class ImageCaptionDelivery:
+    senders: int = 0
+    pending: dict[str, float] = field(default_factory=dict)
+    task: asyncio.Task[None] | None = None
 
 
 class LockManager:
@@ -121,6 +153,46 @@ class MessageMediaFormatter:
         self.rate_limiter = (
             rate_limiter if rate_limiter is not None else SessionCaptionRateLimiter()
         )
+        self.image_caption_locks = LockManager()
+        self._image_caption_deliveries: dict[tuple[str, str], ImageCaptionDelivery] = {}
+
+    @contextlib.contextmanager
+    def defer_image_captions(self, bot_name: str, group_or_user_id: str):
+        """Postpone automatic image captions until all reply segments are sent.
+
+        Args:
+            bot_name: Bot delivering the reply.
+            group_or_user_id: Destination conversation.
+
+        Yields:
+            Control to the sender while automatic caption requests are deferred.
+        """
+        session = (bot_name, group_or_user_id)
+        delivery = self._image_caption_deliveries.setdefault(
+            session, ImageCaptionDelivery()
+        )
+        delivery.senders += 1
+        try:
+            yield
+        finally:
+            delivery.senders -= 1
+            if not delivery.senders and delivery.task is None:
+                plugin = getattr(self.call_llm, "plugin", None)
+                if delivery.pending and not getattr(plugin, "_terminated", False):
+                    task = asyncio.create_task(
+                        self._caption_deferred_images(session, delivery)
+                    )
+                    delivery.task = task
+                    if (
+                        running_tasks := getattr(plugin, "running_tasks", None)
+                    ) is not None:
+                        task_id = str(id(task))
+                        running_tasks[task_id] = task
+                        task.add_done_callback(
+                            lambda _: running_tasks.pop(task_id, None)
+                        )
+                else:
+                    self._image_caption_deliveries.pop(session)
 
     @staticmethod
     def first_media_url(url: str | None, file_name: str | None) -> str:
@@ -387,6 +459,9 @@ class MessageMediaFormatter:
         defer_caption: bool,
         custom_desc: str | None = None,
         event=None,
+        *,
+        received_at: float | None = None,
+        caption_session: tuple[str, str] | None = None,
     ) -> tuple[str, ChainParseResult]:
         result = ChainParseResult()
         decision_url = self.first_media_url(url, file_name)
@@ -398,7 +473,9 @@ class MessageMediaFormatter:
         # Resolve bot_name and group_or_user_id from event
         bot_name = ""
         group_or_user_id = ""
-        if event and getattr(self.call_llm, "plugin", None):
+        if caption_session is not None:
+            bot_name, group_or_user_id = caption_session
+        elif event and getattr(self.call_llm, "plugin", None):
             bot_name = resolve_bot_name(self.call_llm.plugin, event)
             group_or_user_id = event.get_group_id() or event.get_sender_id() or ""
 
@@ -409,6 +486,7 @@ class MessageMediaFormatter:
             custom_desc=custom_desc,
             bot_name=bot_name,
             group_or_user_id=group_or_user_id,
+            received_at=received_at,
         )
         if not hash_val or not media_caption:
             return "[图片]", result
@@ -544,6 +622,8 @@ class MessageMediaFormatter:
         custom_desc: str | None = None,
         bot_name: str = "",
         group_or_user_id: str = "",
+        *,
+        received_at: float | None = None,
     ) -> tuple[str | None, MediaCaption | None]:
         """Get or generate an image caption using the confirmed media identity.
 
@@ -554,6 +634,7 @@ class MessageMediaFormatter:
             custom_desc: Supplied description to store on the matching image.
             bot_name: Bot requesting the caption.
             group_or_user_id: Conversation requesting the caption.
+            received_at: Monotonic receipt time used for the automatic caption quota.
 
         Returns:
             The resolved media ID and caption, or two empty values.
@@ -618,36 +699,172 @@ class MessageMediaFormatter:
                 )
             elif not self.image_caption_enabled:
                 incoming.is_captioned = True
-            elif not incoming.is_captioned and not defer_caption:
-                session_key = (
-                    f"{bot_name}:{group_or_user_id}"
-                    if bot_name or group_or_user_id
-                    else ""
-                )
-                if not session_key or await self.rate_limiter.acquire(session_key):
-                    base64s, _ = await asyncio.to_thread(
-                        self.http_manager.handle_image, content
-                    )
-                    if base64s:
-                        described = await self.call_llm.call_llm_image_caption(
-                            base64s,
-                            bot_name=bot_name,
-                            group_or_user_id=group_or_user_id,
-                        )
-                        if described:
-                            incoming.genre = described.genre
-                            incoming.character = described.character
-                            incoming.source = described.source
-                            incoming.text = described.text
-                            incoming.caption = described.caption
-                    incoming.is_captioned = True
-                else:
-                    logger.info(
-                        f"[Giftia] Image caption deferred by rate limit: "
-                        f"session={session_key} hash={incoming.hash_val}"
-                    )
             await self.data_cache.set_caption(incoming)
-            return incoming.hash_val, incoming
+
+        # Delivery and message logging can reuse the original while a model call
+        # for the same image is already running.
+        if not incoming.is_captioned and not defer_caption:
+            incoming = (
+                await self._caption_image(
+                    incoming.hash_val,
+                    (bot_name, group_or_user_id),
+                    received_at,
+                    content=content,
+                    content_digest=incoming.content_digest,
+                )
+                or incoming
+            )
+        return incoming.hash_val, incoming
+
+    def _queue_image_while_sending(
+        self, media_id: str, session: tuple[str, str], received_at: float
+    ) -> bool:
+        """Keep a bounded set of images eligible to caption after the reply.
+
+        Args:
+            media_id: Cached original image identifier.
+            session: Bot and destination of the originating message.
+            received_at: Monotonic receipt time for the rate limiter.
+
+        Returns:
+            Whether a reply is currently being sent for this session.
+        """
+        delivery = self._image_caption_deliveries.get(session)
+        if delivery is None or not delivery.senders:
+            return False
+        now = time.monotonic()
+        for queued_id, queued_at in list(delivery.pending.items()):
+            if now - queued_at > self.rate_limiter.window_seconds:
+                del delivery.pending[queued_id]
+        if (
+            now - received_at <= self.rate_limiter.window_seconds
+            and len(delivery.pending) < self.rate_limiter.max_requests
+        ):
+            delivery.pending.setdefault(media_id, received_at)
+        return True
+
+    async def _caption_image(
+        self,
+        media_id: str,
+        session: tuple[str, str],
+        received_at: float | None,
+        *,
+        content: bytes | None = None,
+        content_digest: str | None = None,
+    ) -> MediaCaption | None:
+        """Apply regular captioning rules to an image with a confirmed media ID.
+
+        Args:
+            media_id: Resolved image identifier.
+            session: Bot and destination of the originating message.
+            received_at: Monotonic receipt time for the rate limiter.
+            content: Original bytes if the image was just parsed.
+            content_digest: Identity of the supplied original bytes, if available.
+
+        Returns:
+            The caption record when available.
+        """
+        received_at = time.monotonic() if received_at is None else received_at
+        if self._queue_image_while_sending(media_id, session, received_at):
+            return None
+        bot_name, group_or_user_id = session
+        session_key = f"{bot_name}:{group_or_user_id}" if any(session) else ""
+        if session_key and not await self.rate_limiter.acquire(
+            session_key, received_at=received_at, check_only=True
+        ):
+            logger.info(
+                "[Giftia] Image caption deferred by rate limit: session=%s hash=%s",
+                session_key,
+                media_id,
+            )
+            return None
+
+        async with self.image_caption_locks.lock(media_id):
+            image = await self.data_cache.get_caption_by_hash(media_id)
+            if (
+                image is None
+                or image.media_type != "image"
+                or (
+                    content_digest is not None
+                    and image.content_digest != content_digest
+                )
+            ):
+                return None
+            if image.is_captioned or self._queue_image_while_sending(
+                media_id, session, received_at
+            ):
+                return image
+            if content is None:
+                cache_dir = (
+                    StarTools.get_data_dir("astrbot_plugin_giftia") / "media_cache"
+                )
+                content = await asyncio.to_thread((cache_dir / media_id).read_bytes)
+            base64s, _ = await asyncio.to_thread(
+                self.http_manager.handle_image, content
+            )
+            # A reply may become ready while the image is being prepared.
+            if self._queue_image_while_sending(media_id, session, received_at):
+                return image
+            if session_key and not await self.rate_limiter.acquire(
+                session_key, received_at=received_at
+            ):
+                return image
+            described = None
+            if base64s:
+                described = await self.call_llm.call_llm_image_caption(
+                    base64s, bot_name=bot_name, group_or_user_id=group_or_user_id
+                )
+
+            async with self.hash_locks.lock(media_id):
+                current = await self.data_cache.get_caption_by_hash(media_id)
+                if (
+                    current is None
+                    or current.media_type != "image"
+                    or current.content_digest != image.content_digest
+                ):
+                    return None
+                if current.is_captioned:
+                    return current
+                current = replace(current, is_captioned=True)
+                if described:
+                    current.genre = described.genre
+                    current.character = described.character
+                    current.source = described.source
+                    current.text = described.text
+                    current.caption = described.caption
+                await self.data_cache.update_caption(current)
+                return current
+
+    async def _caption_deferred_images(
+        self, session: tuple[str, str], delivery: ImageCaptionDelivery
+    ) -> None:
+        """Caption queued originals, yielding to any newly accepted reply.
+
+        Args:
+            session: Bot and destination that deferred captioning.
+            delivery: Current send count and queued image IDs for that session.
+        """
+        plugin = getattr(self.call_llm, "plugin", None)
+        try:
+            while (
+                delivery.pending
+                and not delivery.senders
+                and not getattr(plugin, "_terminated", False)
+            ):
+                media_id = next(iter(delivery.pending))
+                received_at = delivery.pending.pop(media_id)
+                try:
+                    await self._caption_image(media_id, session, received_at)
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    logger.exception(
+                        "[Giftia] Deferred image caption failed: %s", media_id
+                    )
+        finally:
+            delivery.task = None
+            if not delivery.senders:
+                self._image_caption_deliveries.pop(session)
 
     @staticmethod
     async def _matches_legacy_image(

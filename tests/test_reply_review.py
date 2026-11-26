@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from xml.etree.ElementTree import fromstring
@@ -21,6 +22,8 @@ from core.database.schema import initialize_database
 from core.llm.call_llm import CallLLM
 from core.llm.prompt import build_decision_prompt, build_reply_review_prompt
 from core.llm.xml_parse import XmlParse
+from core.utils.http_manager import HttpManager
+from core.utils.message_parse import MessageParser
 from core.utils.schemas import (
     Decision,
     MediaCaption,
@@ -31,8 +34,15 @@ from core.utils.schemas import (
 )
 from core.web import bot_api as bot_api_module
 from core.web.bot_api import BotApi
+from PIL import Image as PILImage
+from xxhash import xxh3_64_hexdigest
 
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At, Image, Plain, Reply
+from astrbot.api.star import StarTools
+from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.platform_metadata import PlatformMetadata
 
 
 @pytest_asyncio.fixture
@@ -200,6 +210,112 @@ async def test_formal_reply_uses_image_references_as_stored_without_captioning(
     assert (
         next(message for message in history if message.message_id == tag).content == tag
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["generic", "qq_official_webhook"])
+async def test_ready_reply_sends_every_segment_before_captioning_images(
+    runtime, monkeypatch, tmp_path, platform
+):
+    plugin, manager = runtime.plugin, runtime.manager
+    outgoing = "https://example.com/outgoing.png"
+    incoming = "https://example.com/incoming.png"
+    originals = {}
+    for url, color in [(outgoing, "red"), (incoming, "blue")]:
+        with BytesIO() as buffer:
+            PILImage.new("RGB", (2, 2), color).save(buffer, "PNG")
+            originals[url] = buffer.getvalue()
+    monkeypatch.setattr(StarTools, "get_data_dir", lambda _: tmp_path)
+    http = SimpleNamespace(
+        download_media=AsyncMock(side_effect=originals.__getitem__),
+        handle_image=HttpManager.handle_image,
+    )
+    plugin.call_llm.plugin = plugin
+    plugin.message_parser = MessageParser(
+        plugin.data_cache, http, True, True, plugin.call_llm
+    )
+    plugin.get_bot_config = plugin.bot_map.get
+    plugin.min_reply_interval = plugin.max_reply_interval = 0
+    plugin.active_reply_counters["bot:group"] = 1
+    plugin.data_cache.observe_group_metadata = AsyncMock()
+    plugin.data_cache.initialize_user_profile = AsyncMock()
+    manager.decision_engine.get_trigger.side_effect = [False, None]
+    plugin.call_llm.call_llm_reply.side_effect = [
+        XmlLlmResult(
+            msg_chains=[[Image.fromURL(outgoing)], [Plain("first tail")]],
+            xml_tool_results=[{"name": "test_tool", "results": "ok"}],
+        ),
+        XmlLlmResult(msg_chains=[[Plain("last tail")]]),
+    ]
+
+    ready, release_ready = asyncio.Event(), asyncio.Event()
+    last_sending, release_last = asyncio.Event(), asyncio.Event()
+    operations = []
+
+    async def save_status(**kwargs):
+        ready.set()
+        await release_ready.wait()
+
+    async def send(message):
+        [component] = message.chain
+        if isinstance(component, Plain) and component.text == "last tail":
+            last_sending.set()
+            await release_last.wait()
+        operations.append("image" if isinstance(component, Image) else component.text)
+
+    async def send_by_adapter(event, chain):
+        await send(MessageChain(chain))
+        return True, str(len(operations))
+
+    async def caption(*args, **kwargs):
+        operations.append("caption")
+        return MediaCaption(caption="Caption after sending")
+
+    plugin.data_cache.set_bot_status.side_effect = save_status
+    plugin.call_llm.call_llm_image_caption = AsyncMock(side_effect=caption)
+    plugin.qq_official = SimpleNamespace(send_message=send_by_adapter)
+    dispatcher = ActionDispatcher(plugin)
+
+    async def dispatch(**kwargs):
+        event = kwargs["event"]
+        event.get_platform_name = lambda: platform
+        event.send = send
+        await dispatcher.dispatch_actions(**kwargs)
+
+    manager.action_dispatcher.dispatch_actions.side_effect = dispatch
+    message = AstrBotMessage()
+    message.type = MessageType.GROUP_MESSAGE
+    message.group_id = "group"
+    message.self_id = "self"
+    message.sender = MessageMember("other", "Other")
+    message.message_id = "incoming-image"
+    message.message = [Image.fromURL(incoming)]
+    event = AstrMessageEvent(
+        "", message, PlatformMetadata(platform, "", "adapter"), "group"
+    )
+
+    await runtime.send("seed")
+    try:
+        await asyncio.wait_for(ready.wait(), 2)
+        await asyncio.wait_for(manager.job(event), 2)
+        plugin.call_llm.call_llm_image_caption.assert_not_awaited()
+        release_ready.set()
+        await asyncio.wait_for(last_sending.wait(), 2)
+        assert operations == ["image", "first tail"]
+        for original in originals.values():
+            media = await plugin.db.get_media_caption_by_hash(
+                xxh3_64_hexdigest(original)
+            )
+            assert media and not media.is_captioned
+    finally:
+        release_ready.set()
+        release_last.set()
+        await runtime.drain()
+
+    assert operations == ["image", "first tail", "last tail", "caption", "caption"]
+    for original in originals.values():
+        media = await plugin.db.get_media_caption_by_hash(xxh3_64_hexdigest(original))
+        assert media.is_captioned and media.caption == "Caption after sending"
 
 
 @pytest.mark.asyncio

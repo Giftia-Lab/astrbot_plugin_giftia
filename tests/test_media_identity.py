@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import re
+from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,8 @@ from unittest.mock import AsyncMock
 import aiosqlite
 import pytest
 import pytest_asyncio
+from core.conversation import chat_manager
+from core.conversation.chat_manager import ChatManager
 from core.conversation.media_captioner import MediaCaptioner
 from core.database import migrations
 from core.database.data_cache import DataCache
@@ -21,8 +24,13 @@ from core.utils.schemas import MediaCaption
 from core.web import media_api
 from PIL import Image
 
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.message_components import Image as ImageComponent
 from astrbot.api.message_components import Video
 from astrbot.api.star import StarTools
+from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.platform_metadata import PlatformMetadata
 
 COLLIDING_ID = "0123456789abcdef"
 FIRST_URL = "https://example.com/first"
@@ -73,6 +81,122 @@ def bitmap(color, width):
     with BytesIO() as buffer:
         Image.new("RGB", (width, 4), color).save(buffer, "BMP")
         return buffer.getvalue()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("caption_seconds", "burst_delay", "expected_captions"),
+    [(8.0, 5.0, 8), (61.0, 0.0, 1)],
+)
+async def test_queued_group_images_do_not_gain_caption_slots_while_waiting(
+    media_runtime, monkeypatch, caption_seconds, burst_delay, expected_captions
+):
+    runtime = media_runtime
+    clock = SimpleNamespace(now=100.0)
+    fake_time = SimpleNamespace(monotonic=lambda: clock.now)
+    monkeypatch.setattr(chat_manager, "time", fake_time)
+    monkeypatch.setattr(message_media, "time", fake_time)
+
+    parser = runtime.parser
+    plugin = SimpleNamespace(
+        adapter_id_map={"adapter": "bot"},
+        bot_map={"bot": {}},
+        active_reply_counters={"bot:group": 1},
+        parse_locks=defaultdict(asyncio.Lock),
+        db=runtime.db,
+        data_cache=parser.data_cache,
+        message_parser=parser,
+    )
+    runtime.caller.plugin = plugin
+    monkeypatch.setattr(plugin.data_cache, "observe_group_metadata", AsyncMock())
+    monkeypatch.setattr(plugin.data_cache, "initialize_user_profile", AsyncMock())
+    manager = ChatManager(plugin)
+    manager._enqueue_message = AsyncMock()
+
+    def image_event(index):
+        url = f"https://example.com/image/{index}"
+        runtime.contents[url] = bitmap("red", index + 1)
+        message = AstrBotMessage()
+        message.type = MessageType.GROUP_MESSAGE
+        message.group_id = "group"
+        message.self_id = "bot-user"
+        message.sender = MessageMember("user", "User")
+        message.message_id = str(index)
+        message.message = [ImageComponent(file=url, url=url)]
+        return AstrMessageEvent(
+            "", message, PlatformMetadata("aiocqhttp", "", "adapter"), "group"
+        )
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def caption(*args, **kwargs):
+        started_at = clock.now
+        if not started.is_set():
+            started.set()
+            await release.wait()
+        clock.now = started_at + caption_seconds
+        return MediaCaption(caption="A picture")
+
+    runtime.caller.call_llm_image_caption.side_effect = caption
+    tasks = [asyncio.create_task(manager.job(image_event(0)))]
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        clock.now += burst_delay
+        tasks.extend(
+            asyncio.create_task(manager.job(image_event(i))) for i in range(1, 12)
+        )
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+
+    assert runtime.caller.call_llm_image_caption.await_count == expected_captions
+    assert manager._enqueue_message.await_count == 12
+    for index, call in enumerate(manager._enqueue_message.await_args_list):
+        [media_id] = call.args[3].media_id_list
+        stored = await runtime.db.get_media_caption_by_hash(media_id)
+        assert stored.is_captioned == (index < expected_captions)
+        assert (runtime.cache_dir / media_id).is_file()
+
+    await manager.job(image_event(12))
+    assert runtime.caller.call_llm_image_caption.await_count == expected_captions + 1
+
+
+@pytest.mark.asyncio
+async def test_sent_image_can_be_cached_while_its_caption_is_already_running(
+    media_runtime,
+):
+    runtime = media_runtime
+    runtime.contents[FIRST_URL] = bitmap("red", 4)
+    runtime.caller.plugin = SimpleNamespace(running_tasks={})
+    formatter = runtime.parser.media_formatter
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def caption(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return MediaCaption(caption="Existing caption request")
+
+    runtime.caller.call_llm_image_caption.side_effect = caption
+    session = {"bot_name": "bot", "group_or_user_id": "group"}
+    in_flight = asyncio.create_task(formatter.get_image_caption(FIRST_URL, **session))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        with formatter.defer_image_captions(**session):
+            sent_id, sent = await asyncio.wait_for(
+                formatter.get_image_caption(FIRST_URL, **session), 2
+            )
+            assert not sent.is_captioned
+            assert (runtime.cache_dir / sent_id).is_file()
+    finally:
+        release.set()
+        await in_flight
+        await asyncio.gather(*runtime.caller.plugin.running_tasks.values())
+
+    finished_id, finished = in_flight.result()
+    assert sent_id == finished_id
+    assert finished.caption == "Existing caption request"
+    runtime.caller.call_llm_image_caption.assert_awaited_once()
 
 
 @pytest.mark.asyncio
