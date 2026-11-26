@@ -1,3 +1,11 @@
+## [v0.6.3] - 待定
+
+### Refactor
+- 移除对Astrbot的Tavily直接依赖，避免内置工具更新导致的额外维护，将Astrbot的网络搜索移植到[Giftia ExTool](https://github.com/Giftia-Lab/astrbot_plugin_giftia_extool)。
+
+### Improvements
+- 优化转述提示词，在无法处理的违规图片下依然遵循输出规范。
+
 ## [v0.6.2] - 2026-11-23
 
 ### Fixes

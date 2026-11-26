@@ -20,9 +20,7 @@ from astrbot.core.provider.entities import LLMResponse
 def runtime():
     context = SimpleNamespace(
         tool_loop_agent=AsyncMock(),
-        get_llm_tool_manager=lambda: SimpleNamespace(
-            get_full_tool_set=lambda: ToolSet(), is_builtin_tool=lambda _: False
-        ),
+        get_llm_tool_manager=lambda: SimpleNamespace(get_full_tool_set=ToolSet),
     )
     conf = {"invalid_reply_fallback_provider_ids": ["backup-a", "backup-b"]}
     plugin = SimpleNamespace(

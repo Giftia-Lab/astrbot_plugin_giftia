@@ -1445,10 +1445,7 @@ async def test_model_retry_does_not_replay_native_tool_attempts(
 ):
     from core.llm.call_llm import CallLLM
 
-    tool_manager = SimpleNamespace(
-        get_full_tool_set=lambda: SimpleNamespace(tools=[]),
-        is_builtin_tool=lambda _: False,
-    )
+    tool_manager = SimpleNamespace(get_full_tool_set=lambda: SimpleNamespace(tools=[]))
 
     async def fail(**kwargs):
         if tool_started:

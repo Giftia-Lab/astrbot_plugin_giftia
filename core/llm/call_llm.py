@@ -748,35 +748,6 @@ class CallLLM:
         """
         tool_manager = self.context.get_llm_tool_manager()
         tools_set = tool_manager.get_full_tool_set()
-        try:
-            provider_settings = self.context.astrbot_config_mgr.default_conf.get(
-                "provider_settings", {}
-            )
-        except Exception:
-            provider_settings = {}
-        if provider_settings.get("web_search") and (
-            provider_settings.get("websearch_provider") == "tavily"
-        ):
-            get_builtin_tool = getattr(tool_manager, "get_builtin_tool", None)
-            if get_builtin_tool is None:
-                # Newer AstrBot runtimes construct built-in tools per request.
-                from astrbot.core.astr_agent_runtime.tools.web_search_tools import (
-                    TavilyExtractWebPageTool,
-                    TavilyWebSearchTool,
-                )
-
-                for tool in (TavilyWebSearchTool(), TavilyExtractWebPageTool()):
-                    if tools_set.get_tool(tool.name) is None:
-                        tools_set.add_tool(tool)
-            else:
-                for name in ("web_search_tavily", "tavily_extract_web_page"):
-                    if tools_set.get_tool(name) is not None:
-                        continue
-                    try:
-                        tool = get_builtin_tool(name)
-                    except KeyError:
-                        continue
-                    tools_set.add_tool(tool)
 
         for tool in tools_set.tools[:]:
             if not tool.active:

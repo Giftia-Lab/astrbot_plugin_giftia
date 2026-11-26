@@ -26,7 +26,6 @@ from core.utils.scheduler import Scheduler
 from core.utils.schemas import MessageData
 
 from astrbot.api.star import Context
-from astrbot.core.agent.tool import ToolSet
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
@@ -86,11 +85,8 @@ async def runtime(tmp_path, monkeypatch):
             DeleteScheduledTaskTool(plugin=plugin),
         ]
     }
-    context.get_llm_tool_manager = lambda: SimpleNamespace(
-        get_full_tool_set=lambda: ToolSet(tools=list(tools.values())),
-        get_func=tools.get,
-        is_builtin_tool=lambda _: False,
-    )
+    context.provider_manager = SimpleNamespace(llm_tools=FunctionToolManager())
+    context.add_llm_tools(*tools.values())
     context.tool_loop_agent = AsyncMock(
         return_value=SimpleNamespace(
             completion_text="<message>finished</message>",
@@ -499,10 +495,7 @@ async def test_all_function_tools_follow_the_selected_global_calling_mode(
 ):
     rt = runtime
     generic = SearchMemoryTool(plugin=rt.plugin, name="generic_tool")
-    rt.context.get_llm_tool_manager = lambda: SimpleNamespace(
-        get_full_tool_set=lambda: ToolSet(tools=[*rt.tools.values(), generic]),
-        is_builtin_tool=lambda _: False,
-    )
+    rt.context.add_llm_tools(generic)
     result = await rt.caller.call_llm_reply(
         rt.event,
         "group",
@@ -525,39 +518,6 @@ async def test_all_function_tools_follow_the_selected_global_calling_mode(
         assert call["max_steps"] == 7
     if force_xml:
         assert "不使用原生 function calling" in call["system_prompt"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "web_search, provider, include_tavily",
-    [(False, "tavily", False), (True, "brave", False), (True, "tavily", True)],
-)
-async def test_reply_loads_tavily_tools_from_astrbot(
-    runtime, web_search, provider, include_tavily
-):
-    rt = runtime
-    tool_manager = FunctionToolManager()
-    tool_manager.add_func("plugin_tool", [], "A registered plugin tool.", AsyncMock())
-    rt.context.get_llm_tool_manager = lambda: tool_manager
-    rt.context.astrbot_config_mgr = SimpleNamespace(
-        default_conf={
-            "provider_settings": {
-                "web_search": web_search,
-                "websearch_provider": provider,
-            }
-        }
-    )
-
-    result = await rt.caller.call_llm_reply(
-        rt.event, "group", ["provider"], "persona", "input", use_source_tools=True
-    )
-
-    assert result.msg_texts == ["finished"]
-    tools = rt.context.tool_loop_agent.await_args.kwargs["tools"]
-    expected_names = {"plugin_tool"}
-    if include_tavily:
-        expected_names.update({"web_search_tavily", "tavily_extract_web_page"})
-    assert {tool.name for tool in tools.tools} == expected_names
 
 
 @pytest.mark.asyncio

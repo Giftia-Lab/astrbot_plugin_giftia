@@ -88,7 +88,6 @@ async def rt(tmp_path, monkeypatch):
     )
     context.get_llm_tool_manager = lambda: SimpleNamespace(
         get_full_tool_set=lambda: ToolSet(tools=[lookup, direct]),
-        is_builtin_tool=lambda _: False,
     )
     context.persona_manager = SimpleNamespace(
         get_persona_v3_by_id=lambda _: {"prompt": "Giftia", "tools": None}
