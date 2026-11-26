@@ -178,9 +178,20 @@ def build_xml_instructions(
     tts_instruction: str = "",
     is_qq_official: bool = False,
     use_meme_manager: bool = False,
+    *,
+    allow_group_admin: bool = True,
 ) -> str:
-    """
-    根据配置启用的内置交互功能列表，动态生成硬编码的 XML 提示词和交互规范说明。
+    """Build the XML instructions for the current reply.
+
+    Args:
+        enabled_features: Configured XML features, or None for the defaults.
+        tts_instruction: Optional voice output instructions.
+        is_qq_official: Whether to apply official QQ action restrictions.
+        use_meme_manager: Whether the sticker list comes from Meme Manager.
+        allow_group_admin: Whether to advertise enabled group administration tags.
+
+    Returns:
+        Instructions for the available XML tags.
     """
 
     def is_enabled(feature_name: str) -> bool:
@@ -271,7 +282,7 @@ def build_xml_instructions(
                 '  * **收集**: `<add_sticker media_id="图片ID"/>`。当你看到群友发了极其可爱、有趣或与你高度相关的图片时，使用此标签将它收录到自己的表情包库中。'
             )
 
-    if is_enabled(FeatureKey.GROUP_ADMIN):
+    if allow_group_admin and is_enabled(FeatureKey.GROUP_ADMIN):
         if is_qq_official:
             interactive_lines.append(
                 "- **群管指令（群管专用，请仅在必要且拥有管理员身份时合理使用）**:\n"

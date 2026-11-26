@@ -232,6 +232,35 @@ class DataCache:
 
         task.add_done_callback(completed)
 
+    def bot_can_manage_onebot_group(
+        self, bot_name: str, event: AstrMessageEvent
+    ) -> bool:
+        """Read the bot's role from the loaded OneBot group snapshot.
+
+        Args:
+            bot_name: Bot owning the snapshot.
+            event: OneBot event identifying the current group and bot account.
+
+        Returns:
+            Whether the available snapshot identifies the bot as owner or admin.
+        """
+        group_id = str(event.get_group_id() or "").strip()
+        self_id = str(event.get_self_id() or "").strip()
+        if group_id in ("", "0", "None") or self_id in ("", "0", "None"):
+            return False
+        key = (bot_name, group_id)
+        # A membership notice invalidates the previous roles until refresh succeeds.
+        if key in self._group_metadata_pending or key in self._group_metadata_tasks:
+            return False
+        snapshot = self.group_metadata.get(key, {}).get("onebot_snapshot")
+        if not isinstance(snapshot, dict):
+            return False
+        admin_ids = snapshot.get("admin_ids")
+        return self_id == str(snapshot.get("owner_id") or "") or (
+            isinstance(admin_ids, list)
+            and any(self_id == str(admin_id) for admin_id in admin_ids)
+        )
+
     async def get_group_prompt_data(
         self, bot_name: str, event: AstrMessageEvent
     ) -> str:

@@ -19,6 +19,7 @@ from ..utils.qq_official_action import is_qq_official as is_qq_official_platform
 from ..utils.reply_timing import ReplyTiming
 from ..utils.schemas import (
     Decision,
+    FeatureKey,
     MediaCaption,
     Sticker,
     XmlLlmResult,
@@ -456,11 +457,26 @@ class CallLLM:
         )
         fallback_enabled = bool(fallback_provider_ids)
 
+        group_admin_enabled = (
+            enabled_features is None or FeatureKey.GROUP_ADMIN in enabled_features
+        )
+        allow_group_admin = True
+        if (
+            group_admin_enabled
+            and not is_qq_official_flag
+            and getattr(event, "get_platform_name", lambda: "")() == "aiocqhttp"
+        ):
+            data_cache = getattr(self.plugin, "data_cache", None)
+            allow_group_admin = (
+                data_cache is not None
+                and data_cache.bot_can_manage_onebot_group(bot_name, event)
+            )
         xml_inst = build_xml_instructions(
             enabled_features,
             tts_instruction,
             is_qq_official=is_qq_official_flag,
             use_meme_manager=use_meme_manager,
+            allow_group_admin=allow_group_admin,
         )
         actual_system_prompt = "\n\n".join(
             (

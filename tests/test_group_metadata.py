@@ -233,6 +233,8 @@ async def test_onebot_prompt_uses_persisted_snapshot_without_waiting_for_roster(
     restarted = DataCache(runtime.db, None, None, plugin=runtime.plugin)
     await restarted.observe_group_metadata("bot", runtime.event)
     assert await restarted.get_group_prompt_data("bot", runtime.event) == hot
+    runtime.event.get_self_id = lambda: "100"
+    assert restarted.bot_can_manage_onebot_group("bot", runtime.event)
     assert runtime.event.bot.call_action.await_count == 2
     assert runtime.db.conn.total_changes == changes
     runtime.event.get_group.assert_not_awaited()
@@ -326,10 +328,13 @@ async def test_onebot_refresh_coalesces_arrivals_and_keeps_newer_rename(runtime)
 @pytest.mark.asyncio
 async def test_onebot_failed_member_refresh_keeps_the_snapshot_and_retries(runtime):
     runtime.event.get_platform_name = lambda: "aiocqhttp"
+    runtime.event.get_self_id = lambda: "100"
     original = {"member_count": 2, "admin_ids": ["100"]}
     await runtime.db.upsert_group_metadata(
         "bot", "123", "群 A", runtime.clock.now, onebot_snapshot=original
     )
+    await runtime.cache.observe_group_metadata("bot", runtime.event)
+    assert runtime.cache.bot_can_manage_onebot_group("bot", runtime.event)
     runtime.event.bot.call_action.side_effect = [
         {"group_name": "群 A"},
         {"status": "failed", "retcode": 1, "data": []},
@@ -338,13 +343,17 @@ async def test_onebot_failed_member_refresh_keeps_the_snapshot_and_retries(runti
     ]
     runtime.event.message_obj.raw_message = {
         "post_type": "notice",
-        "notice_type": "group_decrease",
+        "notice_type": "group_admin",
+        "sub_type": "unset",
+        "user_id": 100,
     }
     await runtime.cache.observe_group_metadata("bot", runtime.event)
+    assert not runtime.cache.bot_can_manage_onebot_group("bot", runtime.event)
     await runtime.settle()
     assert (await runtime.db.get_group_metadata("bot", "123"))[
         "onebot_snapshot"
     ] == original
+    assert not runtime.cache.bot_can_manage_onebot_group("bot", runtime.event)
     runtime.event.message_obj.raw_message = {}
     await runtime.cache.observe_group_metadata("bot", runtime.event)
     assert runtime.event.bot.call_action.await_count == 2
@@ -355,6 +364,7 @@ async def test_onebot_failed_member_refresh_keeps_the_snapshot_and_retries(runti
     assert runtime.event.bot.call_action.await_count == 4
     snapshot = (await runtime.db.get_group_metadata("bot", "123"))["onebot_snapshot"]
     assert snapshot["member_count"] == 1 and snapshot["admin_ids"] == []
+    assert not runtime.cache.bot_can_manage_onebot_group("bot", runtime.event)
 
 
 @pytest.mark.asyncio
